@@ -9,14 +9,17 @@ en `%LOCALAPPDATA%\RiftLoop\`. El PRD completo está en [RiftLoop_PRD_v1.0.md](R
 | Función | Estado |
 |---|---|
 | Detección de estado del cliente (LCU read-only, lockfile) | ✅ |
-| Ingesta de partidas: archivos JSON o Riot API con key local opcional | ✅ |
+| Ingesta de partidas **desde el propio cliente de League** (sin API key) | ✅ |
+| Ingesta alternativa: archivos JSON o Riot API con key local opcional (CLI) | ✅ |
+| Datos y nombres en el **idioma del cliente** (runas, items, hechizos, campeones) | ✅ |
+| Caché local de imágenes de Data Dragon (iconos de items en el overlay) | ✅ |
 | 10 detectores explicables (D01–D10) con evidencia, confianza y exclusiones | ✅ |
 | Misiones de 3–5 partidas con métricas por oportunidad y evaluación | ✅ |
 | Árbol privado de habilidades, racha de mejora y XP saludable | ✅ |
 | Top 3 de champion select (pool + proficiency + composición) | ✅ |
 | Runas, hechizos y árbol de items validados contra el parche instalado | ✅ |
 | Miniquiz de loading (ventana propia, máx. 3 preguntas) | ✅ |
-| Overlay de items externo, click-through, máx. 3 decisiones | ✅ |
+| Overlay de items: cabecera interactiva (mover/expandir/ocultar), cuerpo click-through, iconos | ✅ |
 | Impacto personalizado de parche (diff de snapshots Data Dragon) | ✅ |
 | Contratos de explicación (PRD §30) y log de auditoría | ✅ |
 | Grabación local beta (WGC + H.264, opt-in, solo ventana del juego) | ✅ |
@@ -47,13 +50,14 @@ RiftLoop.Analyzer.exe --report
 Después abre `RiftLoop.Desktop.exe`: pestañas Perfil, Partidas, Post-match, Misión,
 Draft Lab, Parche y Ajustes. En Misión pulsa "Sugerir misión" y acéptala.
 
-## Probar con tus partidas reales
+## Probar con tus partidas reales (sin API key)
 
-1. Consigue una API key de desarrollo en https://developer.riotgames.com (gratis, caduca cada 24 h).
-2. En Desktop → Perfil: escribe tu Riot ID (`Nombre#TAG`), guarda la clave y pulsa
-   "Descargar partidas (API)". O por CLI:
-   `RiftLoop.Analyzer.exe --set-key RGAPI-... && RiftLoop.Analyzer.exe --fetch 20 && RiftLoop.Analyzer.exe --analyze`
-3. La clave se guarda cifrada con DPAPI y solo sale de tu equipo hacia la API de Riot.
+1. Abre el cliente de League y ejecuta `RiftLoop.Desktop.exe`.
+2. En Perfil pulsa **"Descargar del cliente (League)"**: tu Riot ID, tu historial y los
+   timelines se leen del propio cliente. Después, "Analizar pendientes".
+3. Por CLI: `RiftLoop.Analyzer.exe --fetch-lcu 20 && RiftLoop.Analyzer.exe --analyze`.
+4. (Opcional, solo CLI) La Riot API sigue disponible con una key local:
+   `--set-key RGAPI-...` + `--fetch`. La clave se cifra con DPAPI.
 
 ## Probar con el cliente de League abierto
 
@@ -62,9 +66,14 @@ Draft Lab, Parche y Ajustes. En Misión pulsa "Sugerir misión" y acéptala.
 3. En champion select, la pestaña Draft Lab del Desktop se rellena sola con el Top 3;
    al bloquear campeón aparece el plan de runas/hechizos/items.
 4. En loading se abre el miniquiz (cerrarlo nunca penaliza).
-5. Al entrar en partida se lanza el overlay (Ctrl+Shift+O expande, Ctrl+Shift+M lo mueve).
+5. Al entrar en partida se lanza el overlay: arrastra su barra superior para moverlo,
+   [+] expande, [x] lo oculta el resto de la partida (Ctrl+Shift+O también expande).
    Si activaste la grabación en Ajustes, Capture graba la ventana del juego a MP4.
-6. Al terminar, el Agent lanza el análisis en prioridad baja y avisa al Desktop.
+6. Al terminar, el Agent importa la partida desde el cliente y la analiza en prioridad
+   baja; el Desktop muestra el resultado solo.
+
+Los datos estáticos (nombres de runas, items, hechizos, campeones) se descargan en el
+idioma del cliente (p. ej. es_AR) y se refrescan al cambiar el parche.
 
 ## Procesos
 

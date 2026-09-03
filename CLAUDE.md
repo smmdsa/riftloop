@@ -9,7 +9,10 @@ Estructura: `src/core/` (lib estática con toda la lógica), `src/agent|desktop|
 (un exe cada uno), `tests/` (suite única con fixtures sintéticos + Data Dragon 16.17.1
 vendorizado en `tests/fixtures/ddragon/`). Capture existe como beta opt-in (WGC + MF
 H.264, sin recorte de clips). Las escrituras al cliente no existen en este build.
-[README.md](README.md) documenta el uso.
+La ingesta primaria es el historial del propio cliente (LCU lol-match-history, formato
+v4 convertido a v5 en src/core/lcu_history.cpp); la Riot API con key es fallback de CLI.
+Data Dragon se descarga en el locale del cliente (resolveDataLocale) con iconos en
+cache/img/. [README.md](README.md) documenta el uso.
 
 RiftLoop es un compañero nativo de mejora para League of Legends en Windows 10/11 x64.
 El PRD [RiftLoop_PRD_v1.0.md](RiftLoop_PRD_v1.0.md) es la fuente de verdad. Antes de
