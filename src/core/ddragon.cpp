@@ -180,6 +180,19 @@ bool Ddragon::parseFiles(const fs::path& dir) {
     }
 }
 
+std::string Ddragon::displayPatch() const {
+    size_t d1 = version_.find('.');
+    if (d1 == std::string::npos) return version_;
+    size_t d2 = version_.find('.', d1 + 1);
+    std::string minor = version_.substr(d1 + 1, d2 == std::string::npos ? std::string::npos
+                                                                        : d2 - d1 - 1);
+    try {
+        int major = std::stoi(version_.substr(0, d1));
+        if (major >= 15) return std::to_string(major + 10) + "." + minor;
+    } catch (...) {}
+    return version_;
+}
+
 const ChampInfo* Ddragon::champion(const std::string& id) const {
     auto it = champs_.find(id);
     return it == champs_.end() ? nullptr : &it->second;
@@ -273,6 +286,20 @@ std::string Ddragon::perkIconUrl(int perkOrStyleId) const {
     auto it = perkIcons_.find(perkOrStyleId);
     if (it == perkIcons_.end() || it->second.empty()) return {};
     return "https://ddragon.leagueoflegends.com/cdn/img/" + it->second;
+}
+
+std::string Ddragon::spellIconUrl(const std::string& simpleName) const {
+    static const std::map<std::string, std::string> kMap = {
+        {"Flash", "SummonerFlash"},   {"Teleport", "SummonerTeleport"},
+        {"Heal", "SummonerHeal"},     {"Ignite", "SummonerDot"},
+        {"Exhaust", "SummonerExhaust"}, {"Barrier", "SummonerBarrier"},
+        {"Cleanse", "SummonerBoost"}, {"Ghost", "SummonerHaste"},
+        {"Smite", "SummonerSmite"},
+    };
+    auto it = kMap.find(simpleName);
+    if (it == kMap.end()) return {};
+    return "https://ddragon.leagueoflegends.com/cdn/" + version_ + "/img/spell/" + it->second +
+           ".png";
 }
 
 CompTraits Ddragon::traits(const std::string& champId) const {

@@ -52,6 +52,9 @@ public:
 
     const std::string& version() const { return version_; }
     const std::string& locale() const { return locale_; }
+    // Client-facing patch number. Riot renamed seasons: ddragon "16.17.x"
+    // is shown as "26.17" in the League client (major + 10).
+    std::string displayPatch() const;
 
     const ChampInfo* champion(const std::string& id) const;   // by ddragon id
     const ChampInfo* championByKey(int key) const;
@@ -74,6 +77,7 @@ public:
     std::string championIconUrl(const std::string& champId) const;
     std::string itemIconUrl(int itemId) const;
     std::string perkIconUrl(int perkOrStyleId) const;    // "" when unknown
+    std::string spellIconUrl(const std::string& simpleName) const;   // "Flash" -> URL
 
     // Composition traits for one champion (PRD 11.3, derived from tags + info
     // + a small curated table; approximate by design and labeled as such).

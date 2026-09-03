@@ -36,7 +36,8 @@ target_link_libraries(RiftLoop.Agent PRIVATE riftloop_core)
 
 file(GLOB DESKTOP_SOURCES src/desktop/*.cpp)
 add_executable(RiftLoop.Desktop WIN32 ${DESKTOP_SOURCES})
-target_link_libraries(RiftLoop.Desktop PRIVATE riftloop_core comctl32 gdi32 user32)
+target_link_libraries(RiftLoop.Desktop PRIVATE riftloop_core comctl32 gdi32 user32
+                      uxtheme dwmapi msimg32 windowscodecs ole32)
 
 add_executable(RiftLoop.Overlay WIN32 src/overlay/overlay_main.cpp)
 target_link_libraries(RiftLoop.Overlay PRIVATE riftloop_core d2d1 dwrite user32)

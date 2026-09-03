@@ -12,7 +12,10 @@ H.264, sin recorte de clips). Las escrituras al cliente no existen en este build
 La ingesta primaria es el historial del propio cliente (LCU lol-match-history, formato
 v4 convertido a v5 en src/core/lcu_history.cpp); la Riot API con key es fallback de CLI.
 Data Dragon se descarga en el locale del cliente (resolveDataLocale) con iconos en
-cache/img/. [README.md](README.md) documenta el uso.
+cache/img/. El Desktop usa una UI oscura propia: src/desktop/ui.h define el tema, el
+almacén asíncrono de iconos (WM_APP_ICONS) y el control ReportView; el parche se muestra
+con la numeración del cliente via Ddragon::displayPatch (ddragon 16.x -> cliente 26.x).
+[README.md](README.md) documenta el uso.
 
 RiftLoop es un compañero nativo de mejora para League of Legends en Windows 10/11 x64.
 El PRD [RiftLoop_PRD_v1.0.md](RiftLoop_PRD_v1.0.md) es la fuente de verdad. Antes de

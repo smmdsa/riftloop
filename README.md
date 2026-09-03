@@ -12,6 +12,10 @@ en `%LOCALAPPDATA%\RiftLoop\`. El PRD completo está en [RiftLoop_PRD_v1.0.md](R
 | Ingesta de partidas **desde el propio cliente de League** (sin API key) | ✅ |
 | Ingesta alternativa: archivos JSON o Riot API con key local opcional (CLI) | ✅ |
 | Datos y nombres en el **idioma del cliente** (runas, items, hechizos, campeones) | ✅ |
+| Parche mostrado con la numeración real del cliente (26.x) | ✅ |
+| UI oscura moderna con iconografía de Data Dragon (retratos, runas, hechizos, items) | ✅ |
+| Configuración sin escribir: desplegables + "Sugerir pool desde mi historial" | ✅ |
+| Quiz de loading centrado sobre la ventana de League, con explicación en línea | ✅ |
 | Caché local de imágenes de Data Dragon (iconos de items en el overlay) | ✅ |
 | 10 detectores explicables (D01–D10) con evidencia, confianza y exclusiones | ✅ |
 | Misiones de 3–5 partidas con métricas por oportunidad y evaluación | ✅ |

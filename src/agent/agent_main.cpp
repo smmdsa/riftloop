@@ -233,8 +233,9 @@ void poll() {
         GameState prev = g->state;
         g->state = next;
         onEnterState(prev, next);
-        broadcastState();
     }
+    // Heartbeat: clients that connect mid-phase still learn the state.
+    broadcastState();
     if (g->state == GameState::ChampSelect) handleChampSelect();
 
     // Refresh static data while idle: new patch or client locale change.
