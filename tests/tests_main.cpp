@@ -8,6 +8,7 @@
 #include "core/detectors.h"
 #include "core/ingest.h"
 #include "core/ipc.h"
+#include "core/lcu_history.h"
 #include "core/missions.h"
 #include "core/patchimpact.h"
 #include "core/planner.h"
@@ -173,6 +174,14 @@ int main() {
         CHECK(!dd.runeStyles().empty());
         CHECK(dd.summonerKey("SummonerFlash").has_value());
         CHECK(dd.championHealsHeavily("Soraka"));
+        // Localized display names for runes/spells (user request: no raw ids).
+        CHECK_EQ(dd.perkName(8112), std::string("Electrocute"));
+        CHECK_EQ(dd.styleName(8100), std::string("Domination"));
+        CHECK_EQ(dd.summonerNameByKey(4), std::string("Flash"));
+        CHECK_EQ(dd.summonerDisplay("Cleanse"), std::string("Cleanse"));   // SummonerBoost
+        CHECK(!dd.shardName(5008).empty());
+        CHECK(dd.itemIconUrl(3111).find("/img/item/3111.png") != std::string::npos);
+        CHECK(dd.perkIconUrl(8112).find("https://") == 0);
         CompTraits enemy = dd.teamTraits({"Aatrox", "Soraka", "Zed", "Caitlyn", "Leona"});
         CHECK(enemy.healingShields >= 2.0);
     }
@@ -379,6 +388,88 @@ int main() {
         CHECK(db.listMissions().empty());
     }
     fs::remove(dbPath, ec);
+
+    // --- LCU v4 -> v5 converter (client history without API key) ------------
+    if (ddOk) {
+        json v4game;
+        v4game["gameId"] = 987654321;
+        v4game["platformId"] = "LA2";
+        v4game["gameVersion"] = "16.17.702.1234";
+        v4game["gameCreation"] = 1756800000000LL;
+        v4game["gameDuration"] = 1900;
+        v4game["queueId"] = 420;
+        const char* names[4] = {"Ahri", "Garen", "Zed", "Soraka"};
+        for (int i = 0; i < 4; ++i) {
+            json p;
+            p["participantId"] = i + 1;
+            p["championId"] = dd.champion(names[i])->key;
+            p["teamId"] = i < 2 ? 100 : 200;
+            p["spell1Id"] = 4;
+            p["spell2Id"] = 12;
+            p["timeline"] = {{"lane", i == 3 ? "BOTTOM" : "MIDDLE"},
+                             {"role", i == 3 ? "DUO_SUPPORT" : "SOLO"}};
+            p["stats"] = {{"win", i < 2}, {"kills", 5}, {"deaths", 3}, {"assists", 7},
+                          {"goldEarned", 12000}, {"totalMinionsKilled", 180},
+                          {"neutralMinionsKilled", 12}, {"champLevel", 16},
+                          {"item0", 3111}, {"item1", 0}, {"item2", 0}, {"item3", 0},
+                          {"item4", 0}, {"item5", 0}};
+            v4game["participants"].push_back(p);
+            json pi;
+            pi["participantId"] = i + 1;
+            pi["player"] = {{"puuid", std::string("puuid-") + names[i]},
+                            {"gameName", names[i]}, {"tagLine", "LAS"}};
+            v4game["participantIdentities"].push_back(pi);
+        }
+        json v5 = convertLcuGameToV5(v4game, &dd);
+        CHECK_EQ(v5["metadata"]["matchId"].get<std::string>(), std::string("LA2_987654321"));
+        auto conv = parseMatch(v5.dump());
+        CHECK(conv.has_value());
+        if (conv) {
+            CHECK_EQ(conv->patch, std::string("16.17"));
+            CHECK_EQ(conv->participants[0].championName, std::string("Ahri"));
+            CHECK_EQ(conv->participants[3].position, std::string("UTILITY"));
+            CHECK_EQ(conv->participants[0].totalCs, 192);
+            CHECK(conv->byPuuid("puuid-Ahri") != nullptr);
+        }
+
+        // v4 timeline: BUILDING_KILL carries the DESTROYED team's id; the
+        // converter must derive the killer's team.
+        json v4tl;
+        json fr;
+        fr["timestamp"] = 900000;
+        fr["participantFrames"]["1"] = {{"totalGold", 5000}, {"currentGold", 500},
+                                        {"minionsKilled", 90}, {"level", 9}};
+        fr["events"] = json::array();
+        fr["events"].push_back({{"type", "BUILDING_KILL"}, {"timestamp", 900000},
+                                {"killerId", 0}, {"teamId", 200},
+                                {"buildingType", "TOWER_BUILDING"}});
+        fr["events"].push_back({{"type", "ELITE_MONSTER_KILL"}, {"timestamp", 910000},
+                                {"killerId", 3}, {"monsterType", "DRAGON"}});
+        v4tl["frames"].push_back(fr);
+        json v5tl = convertLcuTimelineToV5(v4tl, "LA2_987654321", v5);
+        auto tconv = parseTimeline(v5tl.dump(), "LA2_987654321");
+        CHECK(tconv.has_value());
+        if (tconv) {
+            CHECK_EQ((int)tconv->events.size(), 2);
+            // Blue tower (teamId 200 destroyed) -> killer team 100.
+            CHECK_EQ(tconv->events[0].killerTeamId, 100);
+            // Dragon killed by participant 3 (team 200).
+            CHECK_EQ(tconv->events[1].killerTeamId, 200);
+        }
+    }
+
+    // --- locale resolution ---------------------------------------------------
+    {
+        fs::path locPath = fs::temp_directory_path() / "riftloop_locale_test.db";
+        std::error_code ec2;
+        fs::remove(locPath, ec2);
+        Db ldb(locPath);
+        CHECK_EQ(resolveDataLocale(ldb, nullptr, "es_MX"), std::string("es_MX"));   // config wins
+        CHECK_EQ(resolveDataLocale(ldb, nullptr, ""), std::string("en_US"));        // default
+        ldb.setKv("data_locale", "es_AR");
+        CHECK_EQ(resolveDataLocale(ldb, nullptr, ""), std::string("es_AR"));        // remembered
+        fs::remove(locPath, ec2);
+    }
 
     // --- ipc frame roundtrip -----------------------------------------------
     {

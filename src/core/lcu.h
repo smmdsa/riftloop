@@ -25,6 +25,11 @@ struct ChampSelectView {
     std::vector<int> pickableChampionIds;
 };
 
+struct LcuSummoner {
+    std::string puuid;
+    std::string riotId;              // gameName#tagLine
+};
+
 class Lcu {
 public:
     // Locates the lockfile: explicit path from config, then default installs,
@@ -37,6 +42,17 @@ public:
     std::string gameflowPhase();
 
     std::optional<ChampSelectView> champSelect();
+
+    // Logged-in player; empty on error.
+    std::optional<LcuSummoner> currentSummoner();
+    // Client locale, e.g. "es_AR"; "" on error.
+    std::string clientLocale();
+
+    // Match history of the logged-in player, straight from the client
+    // (no Riot API key). Read-only, no SLA (PRD 13.1).
+    std::vector<int64_t> recentGameIds(int count);
+    std::string gameJson(int64_t gameId);        // full 10-player game (v4 shape)
+    std::string gameTimelineJson(int64_t gameId);    // v4 timeline frames
 
     GameState toGameState(const std::string& phase) const;
 

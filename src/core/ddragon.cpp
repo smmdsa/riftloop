@@ -30,44 +30,70 @@ bool downloadTo(const std::string& path, const fs::path& dest) {
     return util::writeFile(dest, r.body);
 }
 
+bool filesComplete(const fs::path& dir) {
+    return fs::exists(dir / "champion.json") && fs::exists(dir / "item.json") &&
+           fs::exists(dir / "runesReforged.json") && fs::exists(dir / "summoner.json");
+}
+
+bool downloadSet(const std::string& version, const std::string& locale, const fs::path& dir) {
+    if (filesComplete(dir)) return true;
+    std::string base = "/cdn/" + version + "/data/" + locale + "/";
+    bool ok = downloadTo(base + "champion.json", dir / "champion.json") &&
+              downloadTo(base + "item.json", dir / "item.json") &&
+              downloadTo(base + "runesReforged.json", dir / "runesReforged.json") &&
+              downloadTo(base + "summoner.json", dir / "summoner.json");
+    if (ok) util::writeFile(dir / "version.txt", version);
+    return ok;
+}
+
 } // namespace
 
-bool Ddragon::load(bool allowDownload) {
+bool Ddragon::load(bool allowDownload, const std::string& locale) {
     fs::path root = util::cacheDir() / "ddragon";
-
-    // Try the newest cached version first.
-    std::vector<fs::path> cached;
-    std::error_code ec;
-    for (auto& e : fs::directory_iterator(root, ec))
-        if (e.is_directory()) cached.push_back(e.path());
-    std::sort(cached.rbegin(), cached.rend());
+    std::string wantLocale = locale.empty() ? "en_US" : locale;
 
     if (allowDownload) {
         auto vr = http::get(kHost, 443, true, "/api/versions.json");
         if (vr.status == 200) {
             try {
                 std::string latest = json::parse(vr.body).at(0).get<std::string>();
-                fs::path dir = root / latest;
-                bool complete = fs::exists(dir / "champion.json") &&
-                                fs::exists(dir / "item.json") &&
-                                fs::exists(dir / "runesReforged.json") &&
-                                fs::exists(dir / "summoner.json");
-                if (!complete) {
-                    std::string base = "/cdn/" + latest + "/data/en_US/";
-                    complete = downloadTo(base + "champion.json", dir / "champion.json") &&
-                               downloadTo(base + "item.json", dir / "item.json") &&
-                               downloadTo(base + "runesReforged.json", dir / "runesReforged.json") &&
-                               downloadTo(base + "summoner.json", dir / "summoner.json");
-                    util::writeFile(dir / "version.txt", latest);
+                fs::path dir = root / latest / wantLocale;
+                if (downloadSet(latest, wantLocale, dir) && parseFiles(dir)) {
+                    version_ = latest;
+                    locale_ = wantLocale;
+                    return true;
                 }
-                if (complete && parseFiles(dir)) { version_ = latest; return true; }
+                // Locale not served: fall back to en_US (RF: degrade, explain).
+                if (wantLocale != "en_US") {
+                    fs::path en = root / latest / "en_US";
+                    if (downloadSet(latest, "en_US", en) && parseFiles(en)) {
+                        version_ = latest;
+                        locale_ = "en_US";
+                        return true;
+                    }
+                }
             } catch (...) {}
         }
     }
-    for (auto& dir : cached) {
-        if (parseFiles(dir)) {
-            version_ = dir.filename().string();
-            return true;
+
+    // Offline: newest cached version, preferred locale first.
+    std::vector<fs::path> versions;
+    std::error_code ec;
+    for (auto& e : fs::directory_iterator(root, ec))
+        if (e.is_directory()) versions.push_back(e.path());
+    std::sort(versions.rbegin(), versions.rend());
+    for (auto& vdir : versions) {
+        std::vector<fs::path> candidates = {vdir / wantLocale};
+        for (auto& sub : fs::directory_iterator(vdir, ec))
+            if (sub.is_directory()) candidates.push_back(sub.path());
+        candidates.push_back(vdir);      // legacy flat layout
+        for (auto& dir : candidates) {
+            if (!filesComplete(dir)) continue;
+            if (parseFiles(dir)) {
+                version_ = vdir.filename().string();
+                locale_ = dir == vdir ? "en_US" : dir.filename().string();
+                return true;
+            }
         }
     }
     return false;
@@ -78,6 +104,7 @@ bool Ddragon::loadFromDir(const fs::path& dir) {
     std::string v = util::readFile(dir / "version.txt");
     while (!v.empty() && (v.back() == '\n' || v.back() == '\r')) v.pop_back();
     version_ = v.empty() ? dir.filename().string() : v;
+    locale_ = "en_US";
     return true;
 }
 
@@ -89,7 +116,8 @@ bool Ddragon::parseFiles(const fs::path& dir) {
         json summ  = json::parse(util::readFile(dir / "summoner.json"));
 
         champs_.clear(); champByKey_.clear(); items_.clear();
-        styles_.clear(); perkIds_.clear(); summoners_.clear();
+        styles_.clear(); perkIds_.clear(); perkNames_.clear(); perkIcons_.clear();
+        summoners_.clear(); summonerNames_.clear();
 
         for (auto& [id, c] : champ.at("data").items()) {
             ChampInfo ci;
@@ -123,20 +151,28 @@ bool Ddragon::parseFiles(const fs::path& dir) {
             rs.id   = st.value("id", 0);
             rs.key  = st.value("key", "");
             rs.name = st.value("name", "");
+            rs.icon = st.value("icon", "");
+            perkNames_[rs.id] = rs.name;
+            perkIcons_[rs.id] = rs.icon;
             for (auto& slot : st.value("slots", json::array())) {
                 std::vector<int> perks;
                 for (auto& r : slot.value("runes", json::array())) {
                     int pid = r.value("id", 0);
                     perks.push_back(pid);
                     perkIds_.insert(pid);
+                    perkNames_[pid] = r.value("name", "");
+                    perkIcons_[pid] = r.value("icon", "");
                 }
                 rs.slots.push_back(std::move(perks));
             }
             styles_.push_back(std::move(rs));
         }
 
-        for (auto& [id, sp] : summ.at("data").items())
-            summoners_[id] = std::stoi(sp.value("key", "0"));
+        for (auto& [id, sp] : summ.at("data").items()) {
+            int key = std::stoi(sp.value("key", "0"));
+            summoners_[id] = key;
+            summonerNames_[key] = sp.value("name", id);
+        }
 
         return !champs_.empty() && !items_.empty() && !styles_.empty();
     } catch (...) {
@@ -168,10 +204,75 @@ const ItemInfo* Ddragon::item(int id) const {
 
 bool Ddragon::runeExists(int perkId) const { return perkIds_.count(perkId) > 0; }
 
+std::string Ddragon::perkName(int perkId) const {
+    auto it = perkNames_.find(perkId);
+    return it != perkNames_.end() && !it->second.empty() ? it->second
+                                                         : "#" + std::to_string(perkId);
+}
+
+std::string Ddragon::styleName(int styleId) const { return perkName(styleId); }
+
+std::string Ddragon::shardName(int shardId) const {
+    // Stat shards are not part of runesReforged.json; curated bilingual names.
+    bool es = locale_.rfind("es", 0) == 0;
+    switch (shardId) {
+        case 5008: return es ? "Fuerza adaptativa" : "Adaptive Force";
+        case 5005: return es ? "Velocidad de ataque" : "Attack Speed";
+        case 5007: return es ? "Celeridad de habilidades" : "Ability Haste";
+        case 5001: return es ? "Vida" : "Health";
+        case 5010: return es ? "Velocidad de movimiento" : "Move Speed";
+        case 5011: return es ? "Vida" : "Health";
+        case 5013: return es ? "Tenacidad" : "Tenacity";
+        case 5002: return es ? "Armadura" : "Armor";
+        case 5003: return es ? "Resistencia magica" : "Magic Resist";
+    }
+    return "#" + std::to_string(shardId);
+}
+
+std::string Ddragon::summonerNameByKey(int key) const {
+    auto it = summonerNames_.find(key);
+    return it != summonerNames_.end() ? it->second : "#" + std::to_string(key);
+}
+
+std::string Ddragon::summonerNameById(const std::string& id) const {
+    auto it = summoners_.find(id);
+    return it != summoners_.end() ? summonerNameByKey(it->second) : id;
+}
+
+std::string Ddragon::summonerDisplay(const std::string& simpleName) const {
+    static const std::map<std::string, std::string> kMap = {
+        {"Flash", "SummonerFlash"},   {"Teleport", "SummonerTeleport"},
+        {"Heal", "SummonerHeal"},     {"Ignite", "SummonerDot"},
+        {"Exhaust", "SummonerExhaust"}, {"Barrier", "SummonerBarrier"},
+        {"Cleanse", "SummonerBoost"}, {"Ghost", "SummonerHaste"},
+        {"Smite", "SummonerSmite"},
+    };
+    auto it = kMap.find(simpleName);
+    if (it == kMap.end()) return simpleName;
+    std::string name = summonerNameById(it->second);
+    return name == it->second ? simpleName : name;
+}
+
 std::optional<int> Ddragon::summonerKey(const std::string& name) const {
     auto it = summoners_.find(name);
     if (it == summoners_.end()) return std::nullopt;
     return it->second;
+}
+
+std::string Ddragon::championIconUrl(const std::string& champId) const {
+    return "https://ddragon.leagueoflegends.com/cdn/" + version_ + "/img/champion/" + champId +
+           ".png";
+}
+
+std::string Ddragon::itemIconUrl(int itemId) const {
+    return "https://ddragon.leagueoflegends.com/cdn/" + version_ + "/img/item/" +
+           std::to_string(itemId) + ".png";
+}
+
+std::string Ddragon::perkIconUrl(int perkOrStyleId) const {
+    auto it = perkIcons_.find(perkOrStyleId);
+    if (it == perkIcons_.end() || it->second.empty()) return {};
+    return "https://ddragon.leagueoflegends.com/cdn/img/" + it->second;
 }
 
 CompTraits Ddragon::traits(const std::string& champId) const {

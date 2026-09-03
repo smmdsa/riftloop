@@ -89,7 +89,8 @@ std::string Lcu::get(const std::string& path) {
     opt.ignoreCertErrors = true;         // LCU self-signed local cert
     opt.basicUser = "riot";
     opt.basicPass = conn_.password;
-    opt.timeoutMs = 2000;
+    // History payloads are large; state polls stay snappy.
+    opt.timeoutMs = path.rfind("/lol-match-history", 0) == 0 ? 15000 : 2000;
     auto r = http::get("127.0.0.1", conn_.port, true, path, opt);
     return r.status == 200 ? r.body : "";
 }
@@ -140,6 +141,59 @@ std::optional<ChampSelectView> Lcu::champSelect() {
     } catch (...) {
         return std::nullopt;
     }
+}
+
+std::optional<LcuSummoner> Lcu::currentSummoner() {
+    std::string body = get("/lol-summoner/v1/current-summoner");
+    if (body.empty()) return std::nullopt;
+    try {
+        json j = json::parse(body);
+        LcuSummoner s;
+        s.puuid = j.value("puuid", "");
+        std::string name = j.value("gameName", j.value("displayName", ""));
+        std::string tag = j.value("tagLine", "");
+        s.riotId = tag.empty() ? name : name + "#" + tag;
+        if (s.puuid.empty()) return std::nullopt;
+        return s;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::string Lcu::clientLocale() {
+    std::string body = get("/riotclient/region-locale");
+    if (body.empty()) return {};
+    try {
+        return json::parse(body).value("locale", "");
+    } catch (...) {
+        return {};
+    }
+}
+
+std::vector<int64_t> Lcu::recentGameIds(int count) {
+    std::vector<int64_t> out;
+    std::string body = get("/lol-match-history/v1/products/lol/current-summoner/matches"
+                           "?begIndex=0&endIndex=" + std::to_string(count));
+    if (body.empty()) return out;
+    try {
+        json j = json::parse(body);
+        for (auto& game : j.at("games").at("games")) {
+            int64_t id = game.value("gameId", (int64_t)0);
+            // Only classic Summoner's Rift queues are analyzable (PRD 13.3).
+            int qid = game.value("queueId", 0);
+            if (id > 0 && (qid == 420 || qid == 440 || qid == 400 || qid == 430))
+                out.push_back(id);
+        }
+    } catch (...) {}
+    return out;
+}
+
+std::string Lcu::gameJson(int64_t gameId) {
+    return get("/lol-match-history/v1/games/" + std::to_string(gameId));
+}
+
+std::string Lcu::gameTimelineJson(int64_t gameId) {
+    return get("/lol-match-history/v1/game-timelines/" + std::to_string(gameId));
 }
 
 GameState Lcu::toGameState(const std::string& phase) const {

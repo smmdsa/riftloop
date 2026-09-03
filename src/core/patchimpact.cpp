@@ -13,10 +13,22 @@ namespace rl {
 
 namespace {
 
+// champion.json may live flat (legacy) or under a locale subdirectory.
+fs::path championJsonIn(const fs::path& versionDir) {
+    std::error_code ec;
+    if (fs::exists(versionDir / "champion.json", ec)) return versionDir / "champion.json";
+    for (auto& sub : fs::directory_iterator(versionDir, ec))
+        if (sub.is_directory() && fs::exists(sub.path() / "champion.json", ec))
+            return sub.path() / "champion.json";
+    return {};
+}
+
 // Base-stat snapshot for one champion from a cached champion.json.
 json statsFor(const fs::path& dir, const std::string& champ) {
     try {
-        json j = json::parse(util::readFile(dir / "champion.json"));
+        fs::path file = championJsonIn(dir);
+        if (file.empty()) return json::object();
+        json j = json::parse(util::readFile(file));
         if (j.contains("data") && j["data"].contains(champ))
             return j["data"][champ].value("stats", json::object());
     } catch (...) {}
@@ -46,8 +58,8 @@ PatchImpactReport patchImpact(Db& db, const Ddragon& dd) {
     fs::path root = util::cacheDir() / "ddragon";
     fs::path oldDir = rep.fromVersion.empty() ? fs::path{} : root / rep.fromVersion;
     fs::path newDir = root / dd.version();
-    bool canDiff = !rep.fromVersion.empty() && fs::exists(oldDir / "champion.json") &&
-                   fs::exists(newDir / "champion.json");
+    bool canDiff = !rep.fromVersion.empty() && !championJsonIn(oldDir).empty() &&
+                   !championJsonIn(newDir).empty();
 
     std::vector<std::string> seen;
     for (auto& e : prof.pool) {

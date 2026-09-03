@@ -9,6 +9,7 @@
 #include "core/ingest.h"
 #include "core/ipc.h"
 #include "core/lcu.h"
+#include "core/lcu_history.h"
 #include "core/missions.h"
 #include "core/patchimpact.h"
 #include "core/planner.h"
@@ -186,6 +187,13 @@ std::string analysisText(const AnalysisResult& a, const MatchRow* row) {
     return o.str();
 }
 
+// ddragon id -> localized display name.
+std::string champDisplay(const std::string& id) {
+    if (g->ddOk)
+        if (const ChampInfo* c = g->dd.champion(id)) return c->name;
+    return id;
+}
+
 std::string top3Text(const Top3& t) {
     std::ostringstream o;
     if (!t.available) {
@@ -195,7 +203,7 @@ std::string top3Text(const Top3& t) {
     o << "TOP 3 (parche " << t.patch << ")\r\n";
     o << "Incertidumbre: " << t.uncertaintyReason << "\r\n\r\n";
     for (auto& c : t.cards) {
-        o << "== " << c.label << ": " << c.champion << " ==\r\n";
+        o << "== " << c.label << ": " << champDisplay(c.champion) << " ==\r\n";
         for (auto& r : c.reasons) o << "  + " << r << "\r\n";
         o << "  Riesgo: " << c.risk << "\r\n";
         o << "  Experiencia: " << c.experience << "  |  Confianza: " << c.confidence << "\r\n\r\n";
@@ -213,15 +221,36 @@ std::string planText(const std::string& champ, const std::string& role, const Ru
                      const SpellPlan& sp, const ItemPlan& ip,
                      const std::vector<QuizQuestion>& quiz) {
     std::ostringstream o;
-    o << "PLAN PREGAME: " << champ << " " << role << "\r\n\r\n";
-    o << "RUNAS - " << rp.main.name << " (confianza " << rp.confidence << ")\r\n";
-    o << "  Estilos " << rp.main.primaryStyle << " + " << rp.main.subStyle << ", perks:";
-    for (int p : rp.main.perks) o << " " << p;
-    o << "\r\n";
+    o << "PLAN PREGAME: " << champDisplay(champ) << " " << role << "\r\n\r\n";
+    if (g->ddOk && rp.main.perks.size() >= 9) {
+        o << "RUNAS - " << g->dd.styleName(rp.main.primaryStyle) << " + "
+          << g->dd.styleName(rp.main.subStyle) << " (confianza " << rp.confidence << ")\r\n";
+        o << "  Piedra angular: " << g->dd.perkName(rp.main.perks[0]) << "\r\n";
+        o << "  Principales:  " << g->dd.perkName(rp.main.perks[1]) << " | "
+          << g->dd.perkName(rp.main.perks[2]) << " | " << g->dd.perkName(rp.main.perks[3])
+          << "\r\n";
+        o << "  Secundarias:  " << g->dd.perkName(rp.main.perks[4]) << " | "
+          << g->dd.perkName(rp.main.perks[5]) << "\r\n";
+        o << "  Fragmentos:   " << g->dd.shardName(rp.main.perks[6]) << " | "
+          << g->dd.shardName(rp.main.perks[7]) << " | " << g->dd.shardName(rp.main.perks[8])
+          << "\r\n";
+    } else {
+        o << "RUNAS - " << rp.main.name << " (confianza " << rp.confidence << ")\r\n";
+        o << "  Estilos " << rp.main.primaryStyle << " + " << rp.main.subStyle << ", perks:";
+        for (int p : rp.main.perks) o << " " << p;
+        o << "\r\n";
+    }
     for (auto& r : rp.main.reasons) o << "  - " << r << "\r\n";
-    if (rp.situational) o << "  Alternativa: " << rp.situational->name << "\r\n";
-    o << "\r\nHECHIZOS: " << sp.spells[0] << " + " << sp.spells[1] << "\r\n  " << sp.reason
-      << "\r\n";
+    if (rp.situational && g->ddOk && rp.situational->perks.size() >= 6) {
+        o << "  Alternativa: " << g->dd.styleName(rp.situational->subStyle)
+          << " secundaria con " << g->dd.perkName(rp.situational->perks[4]) << " + "
+          << g->dd.perkName(rp.situational->perks[5]);
+        if (!rp.situational->reasons.empty()) o << " (" << rp.situational->reasons[0] << ")";
+        o << "\r\n";
+    }
+    std::string sp1 = g->ddOk ? g->dd.summonerDisplay(sp.spells[0]) : sp.spells[0];
+    std::string sp2 = g->ddOk ? g->dd.summonerDisplay(sp.spells[1]) : sp.spells[1];
+    o << "\r\nHECHIZOS: " << sp1 << " + " << sp2 << "\r\n  " << sp.reason << "\r\n";
     o << "\r\nITEMS (confianza " << ip.confidence << ")\r\n";
     o << "  Inicio:";
     for (int id : ip.starting) o << " " << itemName(id);
@@ -470,29 +499,22 @@ void runAnalysis() {
 }
 
 void runFetch() {
-    if (Config::loadApiKey().empty()) {
-        setText(IDC_PROFILE_STATUS,
-                "Sin API key. Pega tu clave de developer.riotgames.com y pulsa 'Guardar clave'.");
-        return;
-    }
-    setText(IDC_PROFILE_STATUS, "Descargando partidas (respetando rate limits)...");
+    // Match history straight from the League client: no API key (user request).
+    setText(IDC_PROFILE_STATUS, "Descargando historial desde el cliente de League...");
     EnableWindow(ctl(IDC_FETCH_API), FALSE);
     std::thread([] {
-        wchar_t self[MAX_PATH];
-        GetModuleFileNameW(nullptr, self, MAX_PATH);
-        std::wstring dir = self;
-        dir = dir.substr(0, dir.find_last_of(L'\\'));
-        std::wstring cmd = L"\"" + dir + L"\\RiftLoop.Analyzer.exe\" --fetch";
-        STARTUPINFOW si{};
-        si.cb = sizeof si;
-        PROCESS_INFORMATION pi{};
-        if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
-                           nullptr, nullptr, &si, &pi)) {
-            WaitForSingleObject(pi.hProcess, 10 * 60 * 1000);
-            CloseHandle(pi.hProcess);
-            CloseHandle(pi.hThread);
-        }
-        PostMessageW(g->hwnd, WM_APP_IPC, 2, 0);
+        int imported = -1;
+        try {
+            Db db;               // worker connection
+            Config cfg = Config::load();
+            Lcu lcu;
+            if (lcu.connect(cfg.leagueLockfilePath)) {
+                auto r = importFromClient(db, lcu, g->ddOk ? &g->dd : nullptr,
+                                          cfg.matchImportCount);
+                imported = r.error.empty() ? r.imported : -1;
+            }
+        } catch (...) {}
+        PostMessageW(g->hwnd, WM_APP_IPC, 2, (LPARAM)imported);
     }).detach();
 }
 
@@ -829,16 +851,15 @@ void buildPages() {
     mk(0, L"STATIC", L"Datos:", WS_VISIBLE, 20, 348, 60, 22, 0);
     mk(0, L"BUTTON", L"Importar partidas (JSON)...", WS_VISIBLE | BS_PUSHBUTTON, 90, 344, 200, 28,
        IDC_IMPORT_JSON);
-    mk(0, L"BUTTON", L"Descargar partidas (API)", WS_VISIBLE | BS_PUSHBUTTON, 300, 344, 190, 28,
-       IDC_FETCH_API);
-    mk(0, L"BUTTON", L"Analizar pendientes", WS_VISIBLE | BS_PUSHBUTTON, 500, 344, 170, 28,
+    mk(0, L"BUTTON", L"Descargar del cliente (League)", WS_VISIBLE | BS_PUSHBUTTON, 300, 344, 200,
+       28, IDC_FETCH_API);
+    mk(0, L"BUTTON", L"Analizar pendientes", WS_VISIBLE | BS_PUSHBUTTON, 510, 344, 170, 28,
        IDC_ANALYZE);
-    mk(0, L"STATIC", L"API key (opcional, solo local, cifrada con DPAPI):", WS_VISIBLE, 20, 386,
-       320, 22, 0);
-    mk(0, L"EDIT", L"", WS_VISIBLE | WS_BORDER | ES_PASSWORD, 340, 384, 240, 24, IDC_APIKEY);
-    mk(0, L"BUTTON", L"Guardar clave", WS_VISIBLE | BS_PUSHBUTTON, 590, 383, 120, 26,
-       IDC_SAVE_APIKEY);
-    mk(0, L"STATIC", L"", WS_VISIBLE, 20, 420, 700, 44, IDC_PROFILE_STATUS);
+    mk(0, L"STATIC",
+       L"Con el cliente de League abierto, tu identidad e historial se leen del propio cliente. "
+       L"No se necesita API key.",
+       WS_VISIBLE, 20, 386, 700, 34, 0);
+    mk(0, L"STATIC", L"", WS_VISIBLE, 20, 424, 700, 44, IDC_PROFILE_STATUS);
 
     // ---- page 1: Partidas --------------------------------------------------
     HWND ml = mk(1, WC_LISTVIEWW, L"", WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SINGLESEL, 20, 50,
@@ -973,14 +994,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case IDC_IMPORT_JSON: importJsonFiles(); break;
                 case IDC_FETCH_API: runFetch(); break;
                 case IDC_ANALYZE: runAnalysis(); break;
-                case IDC_SAVE_APIKEY: {
-                    std::string key = n(ctl(IDC_APIKEY));
-                    Config::saveApiKey(key);
-                    setText(IDC_APIKEY, "");
-                    setText(IDC_PROFILE_STATUS, key.empty() ? "Clave eliminada."
-                                                            : "Clave guardada con DPAPI.");
-                    break;
-                }
                 case IDC_MATCH_REFRESH: refreshMatchList(); break;
                 case IDC_MATCH_OPEN: {
                     int sel = ListView_GetNextItem(ctl(IDC_MATCH_LIST), -1, LVNI_SELECTED);
@@ -1053,8 +1066,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if ((int)lp > 0 && !rows.empty()) showAnalysis(rows[0].matchId);
             } else if (wp == 2) {    // fetch worker finished
                 EnableWindow(ctl(IDC_FETCH_API), TRUE);
-                setText(IDC_PROFILE_STATUS, "Descarga terminada. Pulsa 'Analizar pendientes'.");
+                int imported = (int)lp;
+                setText(IDC_PROFILE_STATUS, imported < 0
+                    ? "No se pudo leer el historial: abre el cliente de League y reintenta."
+                    : std::to_string(imported) +
+                      " partidas nuevas del cliente. Pulsa 'Analizar pendientes'.");
                 refreshMatchList();
+                refreshProfileUi();  // Riot ID llega solo desde el cliente
             } else {
                 processIpcQueue();
             }
@@ -1088,7 +1106,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
                     MB_ICONERROR);
         return 1;
     }
-    app.ddOk = app.dd.load(true);
+    {
+        // Data language follows the League client (remembered by the Agent).
+        Config cfg = Config::load();
+        std::string locale = resolveDataLocale(*app.db, nullptr, cfg.dataLocale);
+        app.ddOk = app.dd.load(true, locale);
+    }
 
     app.font = CreateFontW(-15, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0,
                            CLEARTYPE_QUALITY, 0, L"Segoe UI");

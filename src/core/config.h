@@ -11,6 +11,7 @@ struct Config {
     bool lcuReadEnabled = true;      // kill flag (PRD 17.3); writes do not exist
     std::string routing = "americas";    // Riot API routing for optional fetch
     std::string leagueLockfilePath;      // "" = auto-detect
+    std::string dataLocale;              // "" = auto (client locale)
     int  matchImportCount = 20;
     int  overlayX = -1, overlayY = -1;   // -1 = default position
 

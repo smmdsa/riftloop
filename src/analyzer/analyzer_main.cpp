@@ -5,6 +5,8 @@
 #include "core/db.h"
 #include "core/ddragon.h"
 #include "core/ingest.h"
+#include "core/lcu.h"
+#include "core/lcu_history.h"
 #include "core/missions.h"
 #include "core/serial.h"
 #include "core/util.h"
@@ -26,7 +28,8 @@ void usage() {
     std::printf(
         "RiftLoop.Analyzer - ingesta y analisis local\n\n"
         "  --ingest <archivo.json>...   Importa partidas (match-v5 o {match,timeline})\n"
-        "  --fetch [N]                  Descarga tus ultimas N partidas (necesita API key)\n"
+        "  --fetch-lcu [N]              Descarga N partidas desde el cliente de League\n"
+        "  --fetch [N]                  Via Riot API (opcional, necesita API key)\n"
         "  --analyze                    Analiza las partidas pendientes\n"
         "  --show <matchId>             Muestra el analisis de una partida\n"
         "  --report                     Resumen: ultima partida, mision, racha\n"
@@ -204,15 +207,38 @@ int main(int argc, char** argv) {
             return fetchMatches(db, n > 0 ? n : 20);
         }
 
-        // Data Dragon is needed from here on.
+        // Data Dragon is needed from here on (localized to the client).
+        Lcu lcu;
+        lcu.connect(Config::load().leagueLockfilePath);
+        std::string locale = resolveDataLocale(db, lcu.connected() ? &lcu : nullptr,
+                                               Config::load().dataLocale);
         Ddragon dd;
-        bool ddOk = dd.load(true);
+        bool ddOk = dd.load(true, locale);
         if (!ddOk) std::printf("aviso: Data Dragon no disponible (sin red y sin cache); "
                                "el analisis pierde D09 y validaciones de parche.\n");
 
+        if (cmd == "--fetch-lcu") {
+            int count = args.size() >= 2 ? std::atoi(args[1].c_str())
+                                         : Config::load().matchImportCount;
+            auto r = importFromClient(db, lcu, ddOk ? &dd : nullptr,
+                                      count > 0 ? count : 20);
+            if (!r.error.empty()) {
+                std::printf("error: %s\n", r.error.c_str());
+                return 1;
+            }
+            std::printf("%d partidas importadas desde el cliente, %d ya existian u "
+                        "omitidas. Ejecuta --analyze.\n", r.imported, r.skipped);
+            return 0;
+        }
         if (cmd == "--auto") {
-            // Agent-invoked mode: fetch when a key exists, then analyze.
-            if (!Config::loadApiKey().empty()) fetchMatches(db, 5);
+            // Agent-invoked mode: client history first, API key as fallback.
+            if (lcu.connected()) {
+                auto r = importFromClient(db, lcu, ddOk ? &dd : nullptr, 5);
+                if (!r.error.empty() && !Config::loadApiKey().empty())
+                    fetchMatches(db, 5);
+            } else if (!Config::loadApiKey().empty()) {
+                fetchMatches(db, 5);
+            }
             analyzePending(db, ddOk ? &dd : nullptr);
             return 0;
         }

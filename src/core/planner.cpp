@@ -340,12 +340,16 @@ std::vector<QuizQuestion> buildQuiz(const Ddragon& dd, const PlanInput& in) {
             QuizQuestion q;
             q.conceptTag = "cc-a-respetar";
             q.text = "¿Que campeon rival concentra el CC que debes respetar?";
+            auto display = [&](const std::string& id) {
+                const ChampInfo* c = dd.champion(id);
+                return c ? c->name : id;     // localized name
+            };
             for (auto& e : in.draft.enemyChampions) {
-                q.options.push_back(e);
+                q.options.push_back(display(e));
                 if (e == best) q.correctIndex = (int)q.options.size() - 1;
                 if (q.options.size() == 4) break;
             }
-            q.explanation = best + " tiene el perfil de control mas alto del draft rival.";
+            q.explanation = display(best) + " tiene el perfil de control mas alto del draft rival.";
             qs.push_back(q);
         }
     }

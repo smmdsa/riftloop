@@ -8,6 +8,8 @@
 #include "core/ddragon.h"
 #include "core/ipc.h"
 #include "core/lcu.h"
+#include "core/lcu_history.h"
+#include "core/imagecache.h"
 #include "core/planner.h"
 #include "core/recommend.h"
 #include "core/serial.h"
@@ -17,6 +19,8 @@
 #include <shellapi.h>
 
 #include <memory>
+#include <thread>
+#include <vector>
 #include <optional>
 #include <string>
 
@@ -42,6 +46,8 @@ struct AgentState {
     ipc::Server server;
     GameState state = GameState::NoClient;
     int64_t lastLcuAttempt = 0;
+    int64_t lastDataCheck = 0;
+    std::string dataLocale;
     std::string lastDraftSignature;  // avoid recompute without draft change (RF-CS-005)
     bool overlaySpawned = false;
     bool analyzerRunning = false;
@@ -152,6 +158,19 @@ void handleChampSelect() {
         msg["data"] = contract;
         msg["quiz"] = quiz;
         g->server.broadcast(msg.dump());
+
+        // Prefetch icons so the overlay draws from local files only.
+        std::vector<std::pair<std::string, std::string>> downloads;   // id, url
+        auto addItem = [&](int id) {
+            downloads.push_back({std::to_string(id), g->dd.itemIconUrl(id)});
+        };
+        for (int id : items.starting) addItem(id);
+        for (int id : items.core) addItem(id);
+        for (auto& b : items.boots) for (int id : b.items) addItem(id);
+        for (auto& b : items.branches) for (int id : b.items) addItem(id);
+        std::thread([downloads] {
+            for (auto& [id, url] : downloads) img::ensure("item", id, url);
+        }).detach();
     }
 }
 
@@ -218,6 +237,21 @@ void poll() {
     }
     if (g->state == GameState::ChampSelect) handleChampSelect();
 
+    // Refresh static data while idle: new patch or client locale change.
+    bool idle = g->state == GameState::NoClient || g->state == GameState::ClientOpen ||
+                g->state == GameState::Lobby;
+    int64_t now2 = GetTickCount64();
+    std::string wanted = resolveDataLocale(*g->db, g->lcu.connected() ? &g->lcu : nullptr,
+                                           g->cfg.dataLocale);
+    bool localeChanged = g->ddOk && wanted != g->dataLocale;
+    if (idle && (localeChanged || now2 - g->lastDataCheck > 6LL * 3600 * 1000)) {
+        g->lastDataCheck = now2;
+        g->dataLocale = wanted;
+        bool ok = g->dd.load(true, wanted);
+        if (ok) g->ddOk = true;
+        g->db->setKv("last_data_version", g->dd.version());
+    }
+
     // Analyzer finished? Tell the Desktop.
     if (g->analyzerRunning && g->analyzerProcess &&
         WaitForSingleObject(g->analyzerProcess, 0) == WAIT_OBJECT_0) {
@@ -282,7 +316,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         return 1;
     }
     state.cfg = Config::load();
-    state.ddOk = state.dd.load(true);
+    state.lcu.connect(state.cfg.leagueLockfilePath);
+    state.dataLocale = resolveDataLocale(*state.db, &state.lcu, state.cfg.dataLocale);
+    state.ddOk = state.dd.load(true, state.dataLocale);
+    state.lastDataCheck = GetTickCount64();
     state.server.start();
 
     WNDCLASSW wc{};
