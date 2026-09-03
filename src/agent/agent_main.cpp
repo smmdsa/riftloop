@@ -18,6 +18,7 @@
 #include <windows.h>
 #include <shellapi.h>
 
+#include <atomic>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -30,6 +31,7 @@ using nlohmann::json;
 namespace {
 
 constexpr UINT WM_TRAY = WM_APP + 1;
+constexpr UINT WM_APP_HISTORY = WM_APP + 2;
 constexpr UINT kTimerPoll = 1;
 constexpr int kPollMs = 1000;        // >= 250 ms rule (PRD 15.4)
 
@@ -51,6 +53,9 @@ struct AgentState {
     std::string lastDraftSignature;  // avoid recompute without draft change (RF-CS-005)
     bool overlaySpawned = false;
     bool analyzerRunning = false;
+    std::atomic<bool> historyCheckRunning{false};
+    int64_t lastHistoryCheck = 0;
+    HWND hwnd = nullptr;
     HANDLE analyzerProcess = nullptr;
     NOTIFYICONDATAW nid{};
 };
@@ -179,7 +184,7 @@ void onEnterState(GameState prev, GameState next) {
 
     if (next == GameState::ChampSelect) g->lastDraftSignature.clear();
 
-    if (next == GameState::Loading) {
+    if (next == GameState::Loading && prev == GameState::ChampSelect) {
         json msg;
         msg["v"] = 1;
         msg["type"] = "quiz_show";
@@ -198,8 +203,8 @@ void onEnterState(GameState prev, GameState next) {
             g->db->audit("capture_started", "{\"source\":\"game_window\"}");
         }
     }
-    if (next == GameState::PostGame && prev == GameState::InGame) {
-        // Fetch (when a key exists) and analyze at low priority (PRD 14.2).
+    if (next == GameState::PostGame) {
+        // Import from the client and analyze at low priority (PRD 14.2).
         if (!g->analyzerRunning) {
             g->analyzerRunning = true;
             spawn(L"RiftLoop.Analyzer.exe", L"--auto", &g->analyzerProcess);
@@ -224,6 +229,11 @@ void poll() {
             next = GameState::NoClient;
         } else {
             next = g->lcu.toGameState(phase);
+            // Alt+F4 mid-game: the gameflow phase stays "InProgress" while the
+            // game process is gone. The match has NOT ended: never downgrade
+            // InGame back to Loading.
+            if (g->state == GameState::InGame && next == GameState::Loading)
+                next = GameState::InGame;
         }
     } else if (!g->lcu.connected()) {
         next = GameState::NoClient;
@@ -253,6 +263,25 @@ void poll() {
         g->db->setKv("last_data_version", g->dd.version());
     }
 
+    // Catch-all heartbeat: finished games land in the client history even
+    // when the phase transitions were missed (Alt+F4, crash, reconnect).
+    bool calmState = g->state == GameState::ClientOpen || g->state == GameState::Lobby ||
+                     g->state == GameState::PostGame;
+    int64_t nowH = GetTickCount64();
+    if (calmState && g->lcu.connected() && !g->analyzerRunning &&
+        !g->historyCheckRunning && nowH - g->lastHistoryCheck > 90'000) {
+        g->lastHistoryCheck = nowH;
+        g->historyCheckRunning = true;
+        Lcu lcuCopy = g->lcu;        // connection info only; own HTTP per call
+        HWND hwnd = g->hwnd;
+        std::thread([lcuCopy, hwnd]() mutable {
+            auto ids = lcuCopy.recentGameIds(3);
+            int64_t newest = ids.empty() ? 0 : ids[0];
+            PostMessageW(hwnd, WM_APP_HISTORY, 0, (LPARAM)newest);
+            g->historyCheckRunning = false;
+        }).detach();
+    }
+
     // Analyzer finished? Tell the Desktop.
     if (g->analyzerRunning && g->analyzerProcess &&
         WaitForSingleObject(g->analyzerProcess, 0) == WAIT_OBJECT_0) {
@@ -268,6 +297,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_TIMER:
             if (wp == kTimerPoll) poll();
             return 0;
+        case WM_APP_HISTORY: {
+            int64_t newest = (int64_t)lp;
+            if (newest > 0) {
+                int64_t known = 0;
+                try { known = std::stoll(g->db->getKv("last_auto_game")); } catch (...) {}
+                if (newest > known && !g->analyzerRunning) {
+                    // Import is idempotent by match id; mark first to avoid loops.
+                    g->db->setKv("last_auto_game", std::to_string(newest));
+                    g->analyzerRunning = true;
+                    spawn(L"RiftLoop.Analyzer.exe", L"--auto", &g->analyzerProcess);
+                    g->db->audit("history_heartbeat",
+                                 "{\"new_game\":" + std::to_string(newest) + "}");
+                }
+            }
+            return 0;
+        }
         case WM_TRAY:
             if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_LBUTTONUP) {
                 POINT pt;
@@ -340,6 +385,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     wcscpy_s(state.nid.szTip, L"RiftLoop (read-only)");
     Shell_NotifyIconW(NIM_ADD, &state.nid);
 
+    state.hwnd = hwnd;
     SetTimer(hwnd, kTimerPoll, kPollMs, nullptr);
     broadcastState();
 

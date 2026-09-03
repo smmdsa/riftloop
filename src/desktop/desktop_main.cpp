@@ -54,7 +54,7 @@ enum : int {
     IDC_POOL_ADD, IDC_POOL_DEL, IDC_POOL_SUGGEST, IDC_SAVE_PROFILE,
     IDC_IMPORT_JSON, IDC_FETCH_API, IDC_ANALYZE, IDC_PROFILE_STATUS,
     // matches
-    IDC_MATCH_LIST = 1200, IDC_MATCH_OPEN, IDC_MATCH_REFRESH,
+    IDC_MATCH_LIST = 1200, IDC_MATCH_OPEN, IDC_MATCH_REFRESH, IDC_MATCH_FETCH,
     // postmatch
     IDC_POST_VIEW = 1300, IDC_FB_OK, IDC_FB_PARTIAL, IDC_FB_WRONG, IDC_FB_CTX,
     IDC_ACCEPT_MISSION,
@@ -781,10 +781,13 @@ void runAnalysis() {
 }
 
 void runFetch() {
-    setText(IDC_PROFILE_STATUS, "Descargando historial desde el cliente de League...");
+    // Client history + analysis in one click (also covers Alt+F4 games).
+    setText(IDC_PROFILE_STATUS, "Buscando partidas nuevas en el cliente de League...");
     EnableWindow(ctl(IDC_FETCH_API), FALSE);
+    EnableWindow(ctl(IDC_MATCH_FETCH), FALSE);
     std::thread([] {
         int imported = -1;
+        int analyzed = 0;
         try {
             Db db;
             Config cfg = Config::load();
@@ -794,8 +797,9 @@ void runFetch() {
                                           cfg.matchImportCount);
                 imported = r.error.empty() ? r.imported : -1;
             }
+            analyzed = analyzePending(db, g->ddOk ? &g->dd : nullptr);
         } catch (...) {}
-        PostMessageW(g->hwnd, WM_APP_IPC, 2, (LPARAM)imported);
+        PostMessageW(g->hwnd, WM_APP_IPC, 2, MAKELPARAM((WORD)(imported + 1), (WORD)analyzed));
     }).detach();
 }
 
@@ -1226,8 +1230,9 @@ void buildPages() {
                             {L"Duración", 90}, {L"Parche", 80}, {L"Estado", 110}});
     g->matchIcons = ImageList_Create(28, 28, ILC_COLOR32, 32, 64);
     ListView_SetImageList(ml, g->matchIcons, LVSIL_SMALL);
-    mkButton(1, L"Ver análisis", X, Y + 492, 140, 30, IDC_MATCH_OPEN);
-    mkButton(1, L"Refrescar", X + 150, Y + 492, 120, 30, IDC_MATCH_REFRESH);
+    mkButton(1, L"⟳ Buscar partidas nuevas", X, Y + 492, 200, 30, IDC_MATCH_FETCH);
+    mkButton(1, L"Ver análisis", X + 210, Y + 492, 140, 30, IDC_MATCH_OPEN);
+    mkButton(1, L"Refrescar", X + 360, Y + 492, 120, 30, IDC_MATCH_REFRESH);
 
     // ---- 2: Post-match -----------------------------------------------------
     mkReport(2, X, Y, W, 440, IDC_POST_VIEW);
@@ -1479,7 +1484,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case IDC_POOL_DEL: removePoolEntry(); break;
                 case IDC_POOL_SUGGEST: suggestPoolFromHistory(); break;
                 case IDC_IMPORT_JSON: importJsonFiles(); break;
-                case IDC_FETCH_API: runFetch(); break;
+                case IDC_FETCH_API:
+                case IDC_MATCH_FETCH: runFetch(); break;
                 case IDC_ANALYZE: runAnalysis(); break;
                 case IDC_MATCH_REFRESH: refreshMatchList(); break;
                 case IDC_MATCH_OPEN: {
@@ -1551,13 +1557,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if ((int)lp > 0 && !rows.empty()) showAnalysis(rows[0].matchId);
             } else if (wp == 2) {
                 EnableWindow(ctl(IDC_FETCH_API), TRUE);
-                int imported = (int)lp;
+                EnableWindow(ctl(IDC_MATCH_FETCH), TRUE);
+                int imported = (int)LOWORD(lp) - 1;
+                int analyzed = (int)HIWORD(lp);
                 setText(IDC_PROFILE_STATUS, imported < 0
                     ? "No se pudo leer el historial: abre el cliente de League y reintenta."
-                    : std::to_string(imported) +
-                      " partidas nuevas del cliente. Pulsa 'Analizar pendientes'.");
+                    : std::to_string(imported) + " partidas nuevas, " +
+                      std::to_string(analyzed) + " analizadas.");
                 refreshMatchList();
-                refreshProfileUi();
+                refreshMission();
+                if (g->currentPage == 0) refreshProfileUi();
+                if (analyzed > 0) {
+                    auto rows = g->db->listMatches(1);
+                    if (!rows.empty() && rows[0].analyzed) showAnalysis(rows[0].matchId);
+                }
             } else {
                 processIpcQueue();
             }
