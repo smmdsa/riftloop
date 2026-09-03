@@ -4,11 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Estado del repositorio
 
-Este repositorio contiene **solo el PRD**: [RiftLoop_PRD_v1.0.md](RiftLoop_PRD_v1.0.md) (2308 líneas).
-No hay código, build system, tests ni control de versiones todavía.
+Iteración 1 implementada: MVP local sin servidores ni cuentas. C++20 + CMake + SQLite.
+Estructura: `src/core/` (lib estática con toda la lógica), `src/agent|desktop|overlay|analyzer/`
+(un exe cada uno), `tests/` (suite única con fixtures sintéticos + Data Dragon 16.17.1
+vendorizado en `tests/fixtures/ddragon/`). Capture y las escrituras al cliente no existen
+en este build. [README.md](README.md) documenta el uso.
 
 RiftLoop es un compañero nativo de mejora para League of Legends en Windows 10/11 x64.
-El PRD es la fuente de verdad. Antes de implementar una función, lee su sección `RF-*`.
+El PRD [RiftLoop_PRD_v1.0.md](RiftLoop_PRD_v1.0.md) es la fuente de verdad. Antes de
+implementar una función, lee su sección `RF-*`.
 
 Índice rápido de las secciones que se consultan más:
 
@@ -27,25 +31,19 @@ El PRD es la fuente de verdad. Antes de implementar una función, lee su secció
 
 ## Build y pruebas
 
-**No existe build system.** El PRD §14.1 fija el toolchain, así que la primera tarea de código
-crea el andamiaje con estas herramientas y no con otras:
+CMake no está en el PATH del sistema: usa `build.cmd`, que carga `VsDevCmd` (VS 2022
+Community) y el CMake/Ninja embebidos de VS.
 
-- C++20, MSVC, CMake (con `CMakePresets.json`), C++/WinRT donde aplique.
-- Windows App SDK + WinUI 3 para `RiftLoop.Desktop.exe`.
-- Win32 puro para los procesos de baja latencia.
-- CTest para las capas de test de §22.1.
-
-Comandos objetivo una vez que exista el andamiaje. No están comprobados; no los ejecutes antes de
-crear los presets:
-
-```powershell
-cmake --preset x64-debug
-cmake --build --preset x64-debug
-ctest --preset x64-debug --output-on-failure
-ctest --preset x64-debug -R <nombre_del_test> --output-on-failure   # un solo test
+```bat
+build.cmd            :: configura + compila debug (build\x64-debug)
+build.cmd release
+build.cmd test       :: compila + ctest
+build\x64-debug\riftloop_tests.exe   :: ejecuta la suite directamente
 ```
 
-Actualiza esta sección con los comandos reales en cuanto el andamiaje exista.
+Los presets están en `CMakePresets.json` (`x64-debug`, `x64-release`). La suite es un solo
+ejecutable con macros `CHECK`; no hay gtest. Deuda conocida frente al PRD §14.1: el Desktop
+es Win32 puro (WinUI 3 pendiente) y no hay C++/WinRT todavía.
 
 ## Arquitectura: seis procesos, un agente que orquesta
 

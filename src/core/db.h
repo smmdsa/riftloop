@@ -43,6 +43,9 @@ public:
     std::vector<std::string> pendingAnalysis();
     std::string matchJson(const std::string& matchId);
     std::string timelineJson(const std::string& matchId);
+    // Fills the user columns once the local player is identified.
+    void    updateMatchUser(const std::string& matchId, const std::string& champion,
+                            const std::string& role, bool win);
 
     // analysis
     void    saveAnalysis(const AnalysisResult& a);

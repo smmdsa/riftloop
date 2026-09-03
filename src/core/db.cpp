@@ -175,6 +175,13 @@ std::string Db::timelineJson(const std::string& matchId) {
     return s.step() ? s.text(0) : "";
 }
 
+void Db::updateMatchUser(const std::string& matchId, const std::string& champion,
+                         const std::string& role, bool win) {
+    Stmt s(db_, "UPDATE matches SET user_champion=?1, user_role=?2, user_win=?3 "
+                "WHERE match_id=?4");
+    s.bind(1, champion).bind(2, role).bind(3, win ? 1 : 0).bind(4, matchId).run();
+}
+
 // ------------------------------------------------------------------ analysis
 
 void Db::saveAnalysis(const AnalysisResult& a) {

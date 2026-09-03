@@ -23,9 +23,25 @@ std::string resolveUserPuuid(Db& db) {
     Profile p = db.loadProfile();
     if (!p.puuid.empty()) return p.puuid;
 
-    // Single local user: the puuid that appears in every stored match.
-    std::map<std::string, int> counts;
     auto rows = db.listMatches(30);
+
+    // First choice: the profile Riot ID matches a participant.
+    if (!p.riotId.empty()) {
+        for (auto& r : rows) {
+            auto m = parseMatch(db.matchJson(r.matchId));
+            if (!m) continue;
+            for (auto& pa : m->participants) {
+                if (_stricmp(pa.riotId.c_str(), p.riotId.c_str()) == 0) {
+                    p.puuid = pa.puuid;
+                    db.saveProfile(p);
+                    return p.puuid;
+                }
+            }
+        }
+    }
+
+    // Fallback: the puuid that appears in every stored match (single user).
+    std::map<std::string, int> counts;
     for (auto& r : rows) {
         auto m = parseMatch(db.matchJson(r.matchId));
         if (!m) continue;
@@ -40,7 +56,8 @@ std::string resolveUserPuuid(Db& db) {
         db.saveProfile(p);
         return best;
     }
-    return rows.size() == 1 ? best : "";
+    // One match and no Riot ID match: identifying the player would be a guess.
+    return "";
 }
 
 std::optional<AnalysisResult> analyzeMatch(Db& db, const Ddragon* dd, const std::string& matchId) {
@@ -54,6 +71,7 @@ std::optional<AnalysisResult> analyzeMatch(Db& db, const Ddragon* dd, const std:
     std::string puuid = resolveUserPuuid(db);
     const Participant* me = puuid.empty() ? nullptr : match->byPuuid(puuid);
     if (!me) return std::nullopt;
+    db.updateMatchUser(matchId, me->championName, me->position, me->win);
 
     DetectorInput in{*match, *tl, me->participantId, dd};
     AnalysisResult res;

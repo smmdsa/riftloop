@@ -12,6 +12,7 @@ struct Config {
     std::string routing = "americas";    // Riot API routing for optional fetch
     std::string leagueLockfilePath;      // "" = auto-detect
     int  matchImportCount = 20;
+    int  overlayX = -1, overlayY = -1;   // -1 = default position
 
     static Config load();
     void save() const;

@@ -27,6 +27,8 @@ Config Config::load() {
         c.routing = j.value("routing", "americas");
         c.leagueLockfilePath = j.value("league_lockfile_path", "");
         c.matchImportCount = j.value("match_import_count", 20);
+        c.overlayX = j.value("overlay_x", -1);
+        c.overlayY = j.value("overlay_y", -1);
     } catch (...) {}
     return c;
 }
@@ -39,6 +41,8 @@ void Config::save() const {
     j["routing"] = routing;
     j["league_lockfile_path"] = leagueLockfilePath;
     j["match_import_count"] = matchImportCount;
+    j["overlay_x"] = overlayX;
+    j["overlay_y"] = overlayY;
     util::writeFile(configPath(), j.dump(2));
 }
 
