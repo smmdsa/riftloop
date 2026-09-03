@@ -173,6 +173,11 @@ void onEnterState(GameState prev, GameState next) {
             spawn(L"RiftLoop.Overlay.exe", L"");
             g->overlaySpawned = true;
         }
+        if (g->cfg.captureEnabled) {
+            // Opt-in recording; the process dies with the game window (RF-REC).
+            spawn(L"RiftLoop.Capture.exe", L"");
+            g->db->audit("capture_started", "{\"source\":\"game_window\"}");
+        }
     }
     if (next == GameState::PostGame && prev == GameState::InGame) {
         // Fetch (when a key exists) and analyze at low priority (PRD 14.2).

@@ -7,7 +7,7 @@ namespace rl {
 
 struct Config {
     bool overlayEnabled = true;
-    bool captureEnabled = false;     // capture is out of iteration 1; kept off
+    bool captureEnabled = false;     // recording opt-in, off by default (RF-REC-001)
     bool lcuReadEnabled = true;      // kill flag (PRD 17.3); writes do not exist
     std::string routing = "americas";    // Riot API routing for optional fetch
     std::string leagueLockfilePath;      // "" = auto-detect

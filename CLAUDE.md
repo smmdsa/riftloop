@@ -7,8 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Iteración 1 implementada: MVP local sin servidores ni cuentas. C++20 + CMake + SQLite.
 Estructura: `src/core/` (lib estática con toda la lógica), `src/agent|desktop|overlay|analyzer/`
 (un exe cada uno), `tests/` (suite única con fixtures sintéticos + Data Dragon 16.17.1
-vendorizado en `tests/fixtures/ddragon/`). Capture y las escrituras al cliente no existen
-en este build. [README.md](README.md) documenta el uso.
+vendorizado en `tests/fixtures/ddragon/`). Capture existe como beta opt-in (WGC + MF
+H.264, sin recorte de clips). Las escrituras al cliente no existen en este build.
+[README.md](README.md) documenta el uso.
 
 RiftLoop es un compañero nativo de mejora para League of Legends en Windows 10/11 x64.
 El PRD [RiftLoop_PRD_v1.0.md](RiftLoop_PRD_v1.0.md) es la fuente de verdad. Antes de

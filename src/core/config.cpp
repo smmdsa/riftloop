@@ -22,7 +22,7 @@ Config Config::load() {
     try {
         json j = json::parse(util::readFile(configPath()));
         c.overlayEnabled = j.value("overlay_enabled", true);
-        c.captureEnabled = false;    // hard off in iteration 1
+        c.captureEnabled = j.value("capture_enabled", false);   // opt-in (RF-REC-001)
         c.lcuReadEnabled = j.value("lcu_read_enabled", true);
         c.routing = j.value("routing", "americas");
         c.leagueLockfilePath = j.value("league_lockfile_path", "");
@@ -36,7 +36,7 @@ Config Config::load() {
 void Config::save() const {
     json j;
     j["overlay_enabled"] = overlayEnabled;
-    j["capture_enabled"] = false;
+    j["capture_enabled"] = captureEnabled;
     j["lcu_read_enabled"] = lcuReadEnabled;
     j["routing"] = routing;
     j["league_lockfile_path"] = leagueLockfilePath;

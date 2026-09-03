@@ -19,7 +19,7 @@ en `%LOCALAPPDATA%\RiftLoop\`. El PRD completo está en [RiftLoop_PRD_v1.0.md](R
 | Overlay de items externo, click-through, máx. 3 decisiones | ✅ |
 | Impacto personalizado de parche (diff de snapshots Data Dragon) | ✅ |
 | Contratos de explicación (PRD §30) y log de auditoría | ✅ |
-| Grabación local (Capture) | ⛔ fuera de la iteración 1 (flag apagado) |
+| Grabación local beta (WGC + H.264, opt-in, solo ventana del juego) | ✅ |
 | Escrituras al cliente (runas/hechizos/Champion Guard) | ⛔ no existen en este build (Approval-Gated, PRD §17) |
 
 ## Compilar
@@ -63,6 +63,7 @@ Draft Lab, Parche y Ajustes. En Misión pulsa "Sugerir misión" y acéptala.
    al bloquear campeón aparece el plan de runas/hechizos/items.
 4. En loading se abre el miniquiz (cerrarlo nunca penaliza).
 5. Al entrar en partida se lanza el overlay (Ctrl+Shift+O expande, Ctrl+Shift+M lo mueve).
+   Si activaste la grabación en Ajustes, Capture graba la ventana del juego a MP4.
 6. Al terminar, el Agent lanza el análisis en prioridad baja y avisa al Desktop.
 
 ## Procesos
@@ -71,6 +72,9 @@ Draft Lab, Parche y Ajustes. En Misión pulsa "Sugerir misión" y acéptala.
 - `RiftLoop.Desktop.exe` — panel Win32 (perfil, análisis, misiones, draft lab).
 - `RiftLoop.Overlay.exe` — ventana externa transparente; solo visible en partida.
 - `RiftLoop.Analyzer.exe` — ingesta y análisis por CLI; prioridad baja.
+- `RiftLoop.Capture.exe` — grabación opt-in de la ventana del juego (beta).
+  Prueba manual: `RiftLoop.Capture.exe --window "RiftLoop" --seconds 5` graba la ventana
+  del Desktop. Límites beta: sin recorte de clips, sin audio, resolución nativa de ventana.
 
 ## Datos y privacidad
 

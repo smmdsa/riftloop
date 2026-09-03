@@ -41,6 +41,11 @@ target_link_libraries(RiftLoop.Desktop PRIVATE riftloop_core comctl32 gdi32 user
 add_executable(RiftLoop.Overlay WIN32 src/overlay/overlay_main.cpp)
 target_link_libraries(RiftLoop.Overlay PRIVATE riftloop_core d2d1 dwrite user32)
 
+add_executable(RiftLoop.Capture src/capture/capture_main.cpp)
+target_link_libraries(RiftLoop.Capture PRIVATE riftloop_core windowsapp d3d11 dxgi
+                      mfplat mfreadwrite mfuuid)
+target_compile_options(RiftLoop.Capture PRIVATE /await)
+
 # --- tests -------------------------------------------------------------------
 enable_testing()
 file(GLOB TEST_SOURCES tests/*.cpp)

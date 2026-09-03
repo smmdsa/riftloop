@@ -61,7 +61,7 @@ enum : int {
     IDC_PATCH_TEXT = 1600, IDC_PATCH_REFRESH,
     // settings page
     IDC_SET_OVERLAY = 1700, IDC_SET_LCU, IDC_SET_LOCKFILE, IDC_SET_SAVE,
-    IDC_SET_WIPE, IDC_SET_AUDIT, IDC_SET_TEXT,
+    IDC_SET_WIPE, IDC_SET_AUDIT, IDC_SET_TEXT, IDC_SET_CAPTURE,
     // quiz dialog buttons
     IDC_QUIZ_OPT0 = 1800, IDC_QUIZ_OPT1, IDC_QUIZ_OPT2, IDC_QUIZ_OPT3, IDC_QUIZ_TEXT,
 };
@@ -617,6 +617,7 @@ void refreshSettings() {
     Config cfg = Config::load();
     CheckDlgButton(g->hwnd, IDC_SET_OVERLAY, cfg.overlayEnabled ? BST_CHECKED : 0);
     CheckDlgButton(g->hwnd, IDC_SET_LCU, cfg.lcuReadEnabled ? BST_CHECKED : 0);
+    CheckDlgButton(g->hwnd, IDC_SET_CAPTURE, cfg.captureEnabled ? BST_CHECKED : 0);
     setText(IDC_SET_LOCKFILE, cfg.leagueLockfilePath);
     std::ostringstream o;
     o << "Datos locales: " << util::narrow(util::dataDir().wstring()) << "\r\n";
@@ -912,6 +913,8 @@ void buildPages() {
        IDC_SET_OVERLAY);
     mk(6, L"BUTTON", L"Lectura del cliente (LCU) activa", WS_VISIBLE | BS_AUTOCHECKBOX, 20, 80,
        260, 24, IDC_SET_LCU);
+    mk(6, L"BUTTON", L"Grabación local en partida (beta, solo ventana del juego)",
+       WS_VISIBLE | BS_AUTOCHECKBOX, 300, 50, 420, 24, IDC_SET_CAPTURE);
     mk(6, L"STATIC", L"Ruta del lockfile (vacío = autodetectar):", WS_VISIBLE, 20, 114, 260, 22, 0);
     mk(6, L"EDIT", L"", WS_VISIBLE | WS_BORDER, 280, 112, 400, 24, IDC_SET_LOCKFILE);
     mk(6, L"BUTTON", L"Guardar ajustes", WS_VISIBLE | BS_PUSHBUTTON, 20, 148, 150, 28,
@@ -1020,6 +1023,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     Config cfg = Config::load();
                     cfg.overlayEnabled = IsDlgButtonChecked(hwnd, IDC_SET_OVERLAY) == BST_CHECKED;
                     cfg.lcuReadEnabled = IsDlgButtonChecked(hwnd, IDC_SET_LCU) == BST_CHECKED;
+                    cfg.captureEnabled = IsDlgButtonChecked(hwnd, IDC_SET_CAPTURE) == BST_CHECKED;
                     cfg.leagueLockfilePath = n(ctl(IDC_SET_LOCKFILE));
                     cfg.save();
                     refreshSettings();
