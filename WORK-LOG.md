@@ -6,6 +6,69 @@ ocurrieron en una sola sesión el 3 y 4 de septiembre de 2026.
 
 ---
 
+## Sesión 14 — 2026-09-04 (versión visible, barra fantasma, y el desfase de relojes)
+
+Tres cosas que el usuario vio en el último test, más los commits de cierre.
+
+**1. No había versión en ningún sitio**, así que no se podía saber si el binario en marcha
+era el recién compilado. `kAppVersion` + marca de compilación del compilador, en el
+sidebar (`v0.2.0 · Sep 4 2026 20:04:50`), en Ajustes y en la cabecera del CLI.
+
+**2. La barra de reproducción se quedaba visible** en otras páginas y cuando no había
+clips. Es una ventana **hermana** del vídeo, no hija — hubo que hacerla así porque el
+swapchain DXGI tapa a los hijos —, y `switchPage` sólo oculta los controles registrados de
+cada página. Ahora se muestra y se oculta a mano según la página y según haya clips, y el
+propio vídeo se esconde cuando no hay nada que reproducir.
+
+**3. El botón ofrecía regenerar desde el replay** en una partida que ya tenía sus clips.
+Era coherente (el raw se borró al generarlos, así que no hay grabación) pero confuso.
+Ahora dice que ya están hechos y que se elija uno de la lista.
+
+### El bug de verdad: los clips caían 153 s antes de su momento
+
+La evidencia decía `[20:00]` y el primer fotograma del clip marcaba `17:12`.
+
+Primera hipótesis, **falsa**: keyframes muy espaciados. Se añadió `--probe` para medirlo y
+salieron a **1,0 s exacto**, tanto en la grabación como en los clips. El corte no tenía la
+culpa.
+
+La causa real: **`gameTime` de la Live Client Data API y los timestamps del timeline de
+Riot no comparten origen**. La API cuenta desde que arranca el proceso del juego; el
+timeline, desde que el reloj de partida marca 0:00. La diferencia es la pantalla de carga
+más la espera en la fuente: los 153 s medidos. Todo el cálculo mezclaba las dos escalas.
+
+Arreglo: Capture guarda también `game_start_offset_sec`, el `EventTime` del evento
+`GameStart` de `/liveclientdata/eventdata`, que es el 0:00 del reloj visible en la escala
+de la API. `videoPositionSec` mueve el timestamp del timeline a esa escala antes de
+restar dónde empezó la grabación. Una grabación sin ese dato **ya no se corta**: se
+conserva con un mensaje, porque cortar desplazado es peor que no cortar.
+
+**Sin verificar:** el arreglo necesita una partida grabada de principio a fin con el
+binario nuevo. Las grabaciones anteriores no llevan el campo y quedan descartadas por
+diseño. Es lo primero que hay que comprobar en la próxima partida.
+
+Esto además le da sentido a la idea del OCR del reloj que el usuario propuso: sirve para
+**calibrar el offset desde el propio vídeo** cuando el sidecar no lo trae, que es
+exactamente el caso de las grabaciones viejas.
+
+### Commits
+
+Ocho commits temáticos, en este orden: muestra local, draft al Desktop, runas,
+clips de vídeo, UI del post-match, CLI y versión, tests, documentación.
+
+**Aviso para quien haga bisect:** los commits intermedios **no compilan por separado**.
+Los archivos grandes (`desktop_main.cpp`, `tests_main.cpp`, `config.*`, `planner.cpp`)
+tocan varios temas a la vez y separarlos habría exigido partir archivos a mano. Sólo el
+conjunto compila.
+
+**Estado:** build limpio, 3073/3073 checks, árbol de trabajo limpio.
+
+**Siguiente sesión: performance harness (PRD §15).** Es un gate de release y lleva
+pendiente desde la primera sesión, mientras el cliente ha ido sumando un reproductor de
+vídeo, corte con Media Foundation y un refresco diario.
+
+---
+
 ## Cierre de sesión — 2026-09-03 / 04
 
 Resumen para leer primero. Debajo, en orden inverso, está el detalle de cada bloque.
