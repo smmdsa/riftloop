@@ -4,3 +4,4 @@ out/
 *.user
 *.db
 *.log
+.claude/

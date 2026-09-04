@@ -1,4 +1,5 @@
 #include "core/db.h"
+#include "core/ingest.h"
 #include "core/serial.h"
 #include "core/util.h"
 
@@ -25,6 +26,7 @@ public:
     }
     Stmt& bind(int i, int64_t v) { sqlite3_bind_int64(st_, i, v); return *this; }
     Stmt& bind(int i, int v)     { sqlite3_bind_int(st_, i, v); return *this; }
+    Stmt& bind(int i, double v)  { sqlite3_bind_double(st_, i, v); return *this; }
     bool step() { return sqlite3_step(st_) == SQLITE_ROW; }
     void run()  { while (sqlite3_step(st_) == SQLITE_ROW) {} }
     std::string text(int c) {
@@ -33,6 +35,7 @@ public:
     }
     int64_t i64(int c) { return sqlite3_column_int64(st_, c); }
     int     i32(int c) { return sqlite3_column_int(st_, c); }
+    double  f64(int c) { return sqlite3_column_double(st_, c); }
 
 private:
     sqlite3_stmt* st_ = nullptr;
@@ -95,7 +98,29 @@ CREATE TABLE IF NOT EXISTS audit(
   id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT, json TEXT, created_at TEXT);
 CREATE TABLE IF NOT EXISTS kv(
   key TEXT PRIMARY KEY, value TEXT);
+-- Local meta sample: one row per participant of every imported match. It holds
+-- no identity of other players (PRD 16, no scouting): champion, role and build
+-- only. This is the legal source for "what wins on this patch" - no scraping.
+CREATE TABLE IF NOT EXISTS builds(
+  match_id TEXT NOT NULL, participant_id INTEGER NOT NULL,
+  patch TEXT, champion TEXT, role TEXT, queue TEXT, win INTEGER,
+  duration_sec INTEGER,
+  primary_style INTEGER, sub_style INTEGER,
+  perks TEXT, items TEXT, spells TEXT,
+  PRIMARY KEY(match_id, participant_id));
+CREATE INDEX IF NOT EXISTS builds_lookup ON builds(champion, role, patch);
 )sql");
+
+    // Additive columns for databases created before they existed. ALTER TABLE
+    // fails when the column is already there, which is the normal case.
+    for (const char* col : {"is_user INTEGER DEFAULT 0",
+                            "enemy_burst REAL DEFAULT 0",
+                            "enemy_cc REAL DEFAULT 0",
+                            "enemy_magic_share REAL DEFAULT 0"}) {
+        try {
+            exec(std::string("ALTER TABLE builds ADD COLUMN ") + col);
+        } catch (...) {}
+    }
 }
 
 // ------------------------------------------------------------------- profile
@@ -131,7 +156,141 @@ bool Db::upsertMatch(const MatchSummary& m, const std::string& rawMatchJson,
      .bind(8, me && me->win ? 1 : 0)
      .bind(9, rawMatchJson).bind(10, rawTimelineJson);
     s.run();
+    upsertBuilds(m, nullptr);
     return true;
+}
+
+namespace {
+
+std::string joinInts(const std::vector<int>& v) {
+    std::string out;
+    for (int x : v) out += (out.empty() ? "" : ",") + std::to_string(x);
+    return out;
+}
+
+std::vector<int> splitInts(const std::string& csv) {
+    std::vector<int> out;
+    size_t pos = 0;
+    while (pos < csv.size()) {
+        size_t next = csv.find(',', pos);
+        if (next == std::string::npos) next = csv.size();
+        try { out.push_back(std::stoi(csv.substr(pos, next - pos))); } catch (...) {}
+        pos = next + 1;
+    }
+    return out;
+}
+
+} // namespace
+
+void Db::upsertBuilds(const MatchSummary& m, const Ddragon* dd) {
+    if (m.remake) return;                 // a remake teaches nothing about builds
+    std::string myPuuid = loadProfile().puuid;
+    for (auto& p : m.participants) {
+        if (p.championName.empty()) continue;
+        std::vector<int> items;
+        for (int id : p.finalItems) if (id > 0) items.push_back(id);
+
+        // Matchup context of this row: the traits of the team it played
+        // against. It is what makes "the page most played into this comp"
+        // answerable instead of "the page most played, period".
+        double burst = 0, cc = 0, magicShare = 0;
+        if (dd) {
+            std::vector<std::string> enemies;
+            for (auto& other : m.participants)
+                if (other.teamId != p.teamId && !other.championName.empty())
+                    enemies.push_back(other.championName);
+            CompTraits t = dd->teamTraits(enemies);
+            burst = t.burst;
+            cc = t.cc;
+            magicShare = t.magical / (t.magical + t.physical + 0.01);
+        }
+
+        Stmt s(db_, "INSERT OR REPLACE INTO builds(match_id,participant_id,patch,champion,"
+                    "role,queue,win,duration_sec,primary_style,sub_style,perks,items,spells,"
+                    "is_user,enemy_burst,enemy_cc,enemy_magic_share) "
+                    "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)");
+        s.bind(1, m.matchId).bind(2, p.participantId).bind(3, m.patch)
+         .bind(4, p.championName).bind(5, p.position).bind(6, m.queue)
+         .bind(7, p.win ? 1 : 0).bind(8, m.gameDurationSec)
+         .bind(9, p.perkPrimaryStyle).bind(10, p.perkSubStyle)
+         .bind(11, joinInts(p.perks)).bind(12, joinInts(items))
+         .bind(13, joinInts({p.summonerSpells[0], p.summonerSpells[1]}))
+         .bind(14, (!myPuuid.empty() && p.puuid == myPuuid) ? 1 : 0)
+         .bind(15, burst).bind(16, cc).bind(17, magicShare);
+        s.run();
+    }
+}
+
+int Db::rebuildBuilds(const Ddragon* dd) {
+    exec("DELETE FROM builds");
+    std::vector<std::string> ids;
+    {
+        Stmt s(db_, "SELECT match_id FROM matches");
+        while (s.step()) ids.push_back(s.text(0));
+    }
+    int rows = 0;
+    for (auto& id : ids) {
+        auto m = parseMatch(matchJson(id));
+        if (!m) continue;
+        upsertBuilds(*m, dd);
+        rows += (int)m->participants.size();
+    }
+    return rows;
+}
+
+int Db::buildCount() {
+    Stmt s(db_, "SELECT COUNT(*) FROM builds");
+    return s.step() ? s.i32(0) : 0;
+}
+
+QueueFamily queueFamilyOf(const std::string& queue) {
+    if (queue.rfind("RANKED", 0) == 0) return QueueFamily::Ranked;
+    if (queue.rfind("NORMAL", 0) == 0) return QueueFamily::Normal;
+    return QueueFamily::Other;          // ARAM, Arena, rotating modes
+}
+
+std::vector<BuildRow> Db::builds(const std::string& champion, const std::string& role,
+                                 const std::string& patch, QueueFamily family) {
+    Stmt s(db_, "SELECT patch,champion,role,queue,win,duration_sec,primary_style,sub_style,"
+                "perks,items,spells,is_user,enemy_burst,enemy_cc,enemy_magic_share FROM builds "
+                "WHERE champion=?1 AND role<>'' AND (?2='' OR role=?2) AND (?3='' OR patch=?3)");
+    s.bind(1, champion).bind(2, role).bind(3, patch);
+    std::vector<BuildRow> out;
+    while (s.step()) {
+        BuildRow b;
+        b.patch = s.text(0);
+        b.champion = s.text(1);
+        b.role = s.text(2);
+        b.queue = s.text(3);
+        if (queueFamilyOf(b.queue) != family) continue;
+        b.win = s.i32(4) != 0;
+        b.durationSec = s.i32(5);
+        b.primaryStyle = s.i32(6);
+        b.subStyle = s.i32(7);
+        b.perks = splitInts(s.text(8));
+        b.items = splitInts(s.text(9));
+        b.spells = splitInts(s.text(10));
+        b.isUser = s.i32(11) != 0;
+        b.enemyBurst = s.f64(12);
+        b.enemyCc = s.f64(13);
+        b.enemyMagicShare = s.f64(14);
+        out.push_back(std::move(b));
+    }
+    return out;
+}
+
+std::vector<std::string> Db::matchesMissingField(const std::string& jsonField) {
+    Stmt s(db_, "SELECT match_id FROM matches WHERE match_json NOT LIKE ?1");
+    s.bind(1, "%\"" + jsonField + "\"%");
+    std::vector<std::string> out;
+    while (s.step()) out.push_back(s.text(0));
+    return out;
+}
+
+void Db::replaceMatchJson(const std::string& matchId, const std::string& rawMatchJson) {
+    Stmt s(db_, "UPDATE matches SET match_json=?2 WHERE match_id=?1");
+    s.bind(1, matchId).bind(2, rawMatchJson);
+    s.run();
 }
 
 bool Db::hasMatch(const std::string& matchId) {

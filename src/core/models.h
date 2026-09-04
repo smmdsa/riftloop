@@ -28,6 +28,9 @@ struct Participant {
     int         champLevel = 0;
     std::array<int, 2>  summonerSpells{0, 0};
     std::vector<int>    finalItems;  // item0..item5
+    int                 perkPrimaryStyle = 0;
+    int                 perkSubStyle     = 0;
+    std::vector<int>    perks;       // 4 primary + 2 secondary, in slot order
 };
 
 struct MatchSummary {
@@ -119,6 +122,10 @@ struct Evidence {                    // PRD section 30 contract
     std::string inference;           // separated from facts
     std::string confidence;          // alta / media / baja
     std::string exclusionsChecked;
+    // Local clip that shows this moment, produced from the client replay.
+    // File name inside the clips folder; empty when there is no clip
+    // (PRD section 30: clip_ref is optional).
+    std::string clipFile;
 };
 
 struct Finding {
@@ -200,6 +207,12 @@ struct DraftContext {
     std::vector<std::string> bans;
     std::vector<std::string> ownedOrPickable; // empty = unknown -> use pool
     std::string patch;
+
+    // The draft is closed when all ten champions are visible. The user is not
+    // in allyChampions, so four allies plus five enemies is the full board.
+    bool closed() const { return allyChampions.size() >= 4 && enemyChampions.size() >= 5; }
+    int  knownPicks() const { return (int)(allyChampions.size() + enemyChampions.size()); }
+    int  missingPicks() const { return 9 - knownPicks() < 0 ? 0 : 9 - knownPicks(); }
 };
 
 struct ChampCard {
@@ -230,6 +243,13 @@ struct RunePlan {
     RunePage main;
     std::optional<RunePage> situational;
     std::string confidence;
+    // A page built on the closed draft cannot be invalidated by a later pick
+    // (RF-RUN-001: generate after the pick is stable).
+    bool        draftClosed = false;
+    int         missingPicks = 0;
+    // Why there is no alternative page, when there is none. RF-RUN-002 forbids
+    // inventing one just to show variety.
+    std::string noAlternativeReason;
 };
 
 struct SpellPlan {

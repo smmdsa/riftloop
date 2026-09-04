@@ -1,5 +1,6 @@
 // SQLite persistence. Single local profile, no accounts (goal: local MVP1).
 #pragma once
+#include "core/ddragon.h"
 #include "core/models.h"
 
 #include <filesystem>
@@ -23,6 +24,33 @@ struct MatchRow {
     bool        userWin = false;
 };
 
+// One participant of one imported match. No puuid, no name: the meta sample
+// never stores who played it.
+struct BuildRow {
+    std::string patch;
+    std::string champion;
+    std::string role;
+    std::string queue;
+    bool        win = false;
+    int         durationSec = 0;
+    int         primaryStyle = 0;
+    int         subStyle = 0;
+    std::vector<int> perks;          // 4 primary + 2 secondary
+    std::vector<int> items;          // final items, zeros removed
+    std::vector<int> spells;
+    bool        isUser = false;      // the row the profile owner played
+    // Traits of the team this row played against. Lets a query ask for the
+    // page most played INTO a comp, not the page most played overall.
+    double      enemyBurst = 0;
+    double      enemyCc = 0;
+    double      enemyMagicShare = 0;
+};
+
+// Queue families kept apart: rune pages of ranked, normals and alternate modes
+// are not the same sample (PRD 13.3).
+enum class QueueFamily { Ranked, Normal, Other };
+QueueFamily queueFamilyOf(const std::string& queue);
+
 class Db {
 public:
     // Opens (and migrates) the database. Default path: %LOCALAPPDATA%\RiftLoop\riftloop.db
@@ -39,9 +67,27 @@ public:
     bool    upsertMatch(const MatchSummary& m, const std::string& rawMatchJson,
                         const std::string& rawTimelineJson);
     bool    hasMatch(const std::string& matchId);
+
+    // ---- local meta sample (builds of all 10 participants, no identities)
+    // dd is optional: without it the matchup context of each row stays zero.
+    void    upsertBuilds(const MatchSummary& m, const Ddragon* dd = nullptr);
+    // Rebuilds the whole table from the stored match json. Cheap and idempotent;
+    // needed after a schema change or for matches imported before it existed.
+    int     rebuildBuilds(const Ddragon* dd = nullptr);
+    int     buildCount();
+    // role or patch empty = no filter on that column. Rows without a role are
+    // never returned: a build with no known position is not comparable.
+    // Alternate modes (ARAM, Arena) never mix with Summoner's Rift.
+    std::vector<BuildRow> builds(const std::string& champion, const std::string& role,
+                                 const std::string& patch,
+                                 QueueFamily family = QueueFamily::Ranked);
     std::vector<MatchRow> listMatches(int limit = 50);
     std::vector<std::string> pendingAnalysis();
     std::string matchJson(const std::string& matchId);
+    // Match ids whose stored json predates a field, e.g. "perks". Used to
+    // re-fetch what an older import could not carry.
+    std::vector<std::string> matchesMissingField(const std::string& jsonField);
+    void    replaceMatchJson(const std::string& matchId, const std::string& rawMatchJson);
     std::string timelineJson(const std::string& matchId);
     // Fills the user columns once the local player is identified.
     void    updateMatchUser(const std::string& matchId, const std::string& champion,

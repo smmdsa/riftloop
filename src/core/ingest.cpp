@@ -82,6 +82,16 @@ std::optional<MatchSummary> parseMatch(const std::string& jsonText) {
             pa.summonerSpells = { p.value("summoner1Id", 0), p.value("summoner2Id", 0) };
             for (int i = 0; i < 6; ++i)
                 pa.finalItems.push_back(p.value("item" + std::to_string(i), 0));
+            // Rune page: 4 primary selections then 2 secondary (RF-RUN-001 input).
+            if (p.contains("perks")) {
+                for (auto& st : p["perks"].value("styles", json::array())) {
+                    std::string kind = st.value("description", "");
+                    if (kind == "primaryStyle") pa.perkPrimaryStyle = st.value("style", 0);
+                    else if (kind == "subStyle") pa.perkSubStyle = st.value("style", 0);
+                    for (auto& sel : st.value("selections", json::array()))
+                        pa.perks.push_back(sel.value("perk", 0));
+                }
+            }
             m.participants.push_back(std::move(pa));
         }
         if (m.participants.empty()) return std::nullopt;

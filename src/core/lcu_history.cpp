@@ -70,6 +70,24 @@ json convertLcuGameToV5(const json& g, const Ddragon* dd) {
         for (int i = 0; i < 6; ++i)
             v5["item" + std::to_string(i)] = st.value("item" + std::to_string(i), 0);
 
+        // v4 keeps the rune page flat (perk0..perk5 + the two style ids). Rebuild
+        // the v5 shape so the ingest has a single parser.
+        json primary = json::array(), sub = json::array();
+        for (int i = 0; i < 6; ++i) {
+            int perk = st.value("perk" + std::to_string(i), 0);
+            if (perk <= 0) continue;
+            (i < 4 ? primary : sub).push_back(json{{"perk", perk}});
+        }
+        if (!primary.empty() || !sub.empty()) {
+            v5["perks"]["styles"] = json::array(
+                {json{{"description", "primaryStyle"},
+                      {"style", st.value("perkPrimaryStyle", 0)},
+                      {"selections", primary}},
+                 json{{"description", "subStyle"},
+                      {"style", st.value("perkSubStyle", 0)},
+                      {"selections", sub}}});
+        }
+
         auto idIt = identities.find(pid);
         if (idIt != identities.end()) {
             const json& player = idIt->second;
@@ -135,6 +153,29 @@ json convertLcuTimelineToV5(const json& tl, const std::string& matchId, const js
     return out;
 }
 
+int refetchRunePages(Db& db, Lcu& lcu, const Ddragon* dd) {
+    if (!lcu.connected()) return 0;
+    int updated = 0;
+    for (auto& matchId : db.matchesMissingField("perks")) {
+        // matchId is PLATFORM_gameId.
+        size_t sep = matchId.rfind('_');
+        if (sep == std::string::npos) continue;
+        int64_t gameId = 0;
+        try { gameId = std::stoll(matchId.substr(sep + 1)); } catch (...) { continue; }
+        std::string raw = lcu.gameJson(gameId);
+        if (raw.empty()) continue;              // client no longer keeps it
+        try {
+            json v5 = convertLcuGameToV5(json::parse(raw), dd);
+            if (!v5["info"]["participants"].empty() &&
+                v5["info"]["participants"][0].contains("perks")) {
+                db.replaceMatchJson(matchId, v5.dump());
+                ++updated;
+            }
+        } catch (...) {}
+    }
+    return updated;
+}
+
 LcuImportResult importFromClient(Db& db, Lcu& lcu, const Ddragon* dd, int count) {
     LcuImportResult res;
     if (!lcu.connected()) {
@@ -173,8 +214,12 @@ LcuImportResult importFromClient(Db& db, Lcu& lcu, const Ddragon* dd, int count)
 
             auto m = parseMatch(v5.dump());
             if (!m) { ++res.skipped; continue; }
-            if (db.upsertMatch(*m, v5.dump(), v5tl.is_null() ? "" : v5tl.dump()))
+            if (db.upsertMatch(*m, v5.dump(), v5tl.is_null() ? "" : v5tl.dump())) {
+                // Rewrite the build rows with static data so each one carries
+                // the traits of the team it faced.
+                if (dd) db.upsertBuilds(*m, dd);
                 ++res.imported;
+            }
             else
                 ++res.skipped;
         } catch (...) {
