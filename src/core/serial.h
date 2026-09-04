@@ -36,7 +36,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Profile, riotId, puuid, region, 
                                                 preferredRoles, pool, language)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Evidence, evidenceId, matchId, gameTimestampMs,
                                                 source, observedFacts, inference, confidence,
-                                                exclusionsChecked)
+                                                exclusionsChecked, clipFile)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Finding, detectorId, matchId, title, whyItMatters,
                                                 alternative, confidence, severity, opportunities,
                                                 failures, evidence)
@@ -60,12 +60,19 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(QuizQuestion, conceptTag, text, 
                                                 explanation)
 
 inline void to_json(json& j, const RunePlan& r) {
-    j = json{{"main", r.main}, {"confidence", r.confidence}};
+    j = json{{"main", r.main},
+             {"confidence", r.confidence},
+             {"draftClosed", r.draftClosed},
+             {"missingPicks", r.missingPicks},
+             {"noAlternativeReason", r.noAlternativeReason}};
     if (r.situational) j["situational"] = *r.situational;
 }
 inline void from_json(const json& j, RunePlan& r) {
     j.at("main").get_to(r.main);
     r.confidence = j.value("confidence", "media");
+    r.draftClosed = j.value("draftClosed", false);
+    r.missingPicks = j.value("missingPicks", 0);
+    r.noAlternativeReason = j.value("noAlternativeReason", "");
     if (j.contains("situational")) r.situational = j.at("situational").get<RunePage>();
 }
 

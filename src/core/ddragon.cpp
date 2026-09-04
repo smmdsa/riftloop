@@ -225,6 +225,28 @@ std::string Ddragon::perkName(int perkId) const {
 
 std::string Ddragon::styleName(int styleId) const { return perkName(styleId); }
 
+int Ddragon::perkSlot(int styleId, int perkId) const {
+    for (auto& st : styles_) {
+        if (st.id != styleId) continue;
+        for (size_t row = 0; row < st.slots.size(); ++row)
+            for (int id : st.slots[row])
+                if (id == perkId) return (int)row;
+        return -1;
+    }
+    return -1;
+}
+
+const std::vector<std::vector<int>>& Ddragon::shardRows() const {
+    // Offense, flex, defense. 5001 sits in both flex and defense rows, which is
+    // why a page may legitimately show two "Vida" shards.
+    static const std::vector<std::vector<int>> kRows = {
+        {5008, 5005, 5007},
+        {5008, 5010, 5001},
+        {5011, 5013, 5001},
+    };
+    return kRows;
+}
+
 std::string Ddragon::shardName(int shardId) const {
     // Stat shards are not part of runesReforged.json; curated bilingual names.
     bool es = locale_.rfind("es", 0) == 0;

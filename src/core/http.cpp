@@ -36,8 +36,8 @@ struct Handle {
 
 } // namespace
 
-Response get(const std::string& host, int port, bool https,
-             const std::string& path, const Options& opt) {
+Response request(const std::string& method, const std::string& host, int port, bool https,
+                 const std::string& path, const std::string& body, const Options& opt) {
     Response r;
 
     Handle session;
@@ -51,7 +51,8 @@ Response get(const std::string& host, int port, bool https,
     if (!conn.h) { r.error = "WinHttpConnect failed"; return r; }
 
     Handle req;
-    req.h = WinHttpOpenRequest(conn.h, L"GET", util::widen(path).c_str(), nullptr,
+    req.h = WinHttpOpenRequest(conn.h, util::widen(method).c_str(), util::widen(path).c_str(),
+                               nullptr,
                                WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                                https ? WINHTTP_FLAG_SECURE : 0);
     if (!req.h) { r.error = "WinHttpOpenRequest failed"; return r; }
@@ -75,7 +76,8 @@ Response get(const std::string& host, int port, bool https,
     BOOL ok = WinHttpSendRequest(req.h,
                                  headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
                                  headers.empty() ? 0 : (DWORD)-1,
-                                 WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+                                 body.empty() ? WINHTTP_NO_REQUEST_DATA : (LPVOID)body.data(),
+                                 (DWORD)body.size(), (DWORD)body.size(), 0);
     if (!ok || !WinHttpReceiveResponse(req.h, nullptr)) {
         r.error = "request failed, code " + std::to_string(GetLastError());
         return r;

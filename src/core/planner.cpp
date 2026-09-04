@@ -1,5 +1,7 @@
 #include "core/planner.h"
 #include "core/ingest.h"
+#include "core/meta.h"
+#include "core/util.h"
 
 #include <algorithm>
 #include <map>
@@ -32,38 +34,98 @@ StyleTemplate primaryFor(const std::string& tag) {
     return {kSorcery, 8229, {8226, 8210, 8237}};
 }
 
-// Fix ids that no longer exist: use the perk actually present in that slot.
-void validatePage(const Ddragon& dd, RunePage& page, bool* degraded) {
+// A page is legal when every perk can actually be selected in the client:
+// - the keystone comes from row 0 of the primary style,
+// - each primary minor comes from its own row (1, 2, 3),
+// - the two secondary perks come from DIFFERENT rows of the sub style,
+// - each stat shard comes from its own row.
+//
+// The old version only checked that a perk existed somewhere in the tree, so it
+// accepted two secondaries of the same row - a page the client cannot select.
+void validateRunePageImpl(const Ddragon& dd, RunePage& page, bool* degraded) {
     const RuneStyle* prim = nullptr;
     const RuneStyle* sub = nullptr;
-    for (auto& s : dd.runeStyles()) {
-        if (s.id == page.primaryStyle) prim = &s;
-        if (s.id == page.subStyle) sub = &s;
+    for (auto& st : dd.runeStyles()) {
+        if (st.id == page.primaryStyle) prim = &st;
+        if (st.id == page.subStyle) sub = &st;
     }
-    if (!prim || !sub) { *degraded = true; return; }
-    // perks layout: [keystone, p1, p2, p3, s1, s2] + 3 shards (not validated:
-    // stat shards are not part of runesReforged.json).
-    for (int i = 0; i < 4 && i < (int)page.perks.size(); ++i) {
+    if (!prim || !sub || page.perks.size() < 9) { *degraded = true; return; }
+
+    // Primary: keystone plus one perk per row.
+    for (int i = 0; i < 4; ++i) {
         if (i >= (int)prim->slots.size()) break;
-        if (!dd.runeExists(page.perks[i]) ||
-            std::find(prim->slots[i].begin(), prim->slots[i].end(), page.perks[i]) ==
-                prim->slots[i].end()) {
+        if (dd.perkSlot(prim->id, page.perks[i]) != i) {
             if (!prim->slots[i].empty()) page.perks[i] = prim->slots[i][0];
             *degraded = true;
         }
     }
-    for (int i = 4; i < 6 && i < (int)page.perks.size(); ++i) {
-        int slot = i - 3;            // secondary uses slots 1..3 (no keystone)
-        if (slot >= (int)sub->slots.size()) break;
-        bool ok = false;
-        for (auto& sl : sub->slots)
-            if (std::find(sl.begin(), sl.end(), page.perks[i]) != sl.end()) ok = true;
-        if (!dd.runeExists(page.perks[i]) || !ok) {
-            if ((int)sub->slots.size() > slot && !sub->slots[slot].empty())
-                page.perks[i] = sub->slots[slot][0];
+
+    // Secondary: two perks, rows 1..3, never the same row twice.
+    int rowA = dd.perkSlot(sub->id, page.perks[4]);
+    int rowB = dd.perkSlot(sub->id, page.perks[5]);
+    if (rowA < 1) {
+        page.perks[4] = 0;
+        rowA = -1;
+        *degraded = true;
+    }
+    if (rowB < 1 || rowB == rowA) {
+        page.perks[5] = 0;
+        rowB = -1;
+        *degraded = true;
+    }
+    // Fill whatever is missing from a row that is still free.
+    for (int idx = 4; idx <= 5; ++idx) {
+        if (page.perks[idx] != 0) continue;
+        int taken = dd.perkSlot(sub->id, page.perks[idx == 4 ? 5 : 4]);
+        for (size_t row = 1; row < sub->slots.size(); ++row) {
+            if ((int)row == taken || sub->slots[row].empty()) continue;
+            page.perks[idx] = sub->slots[row][0];
+            break;
+        }
+    }
+
+    // Shards: one per row.
+    const auto& shardRows = dd.shardRows();
+    for (size_t i = 0; i < shardRows.size() && 6 + i < page.perks.size(); ++i) {
+        const auto& row = shardRows[i];
+        if (std::find(row.begin(), row.end(), page.perks[6 + i]) == row.end()) {
+            page.perks[6 + i] = row.front();
             *degraded = true;
         }
     }
+}
+
+// Picks two secondary perks from different rows, honouring the order of
+// `wanted`. Anything that would repeat a row is skipped, and free rows fill the
+// rest. Returns the pair actually chosen.
+std::pair<int, int> pickSecondary(const Ddragon& dd, int subStyle,
+                                  const std::vector<int>& wanted) {
+    int chosen[2] = {0, 0};
+    int rows[2] = {-1, -1};
+    int n = 0;
+    for (int perk : wanted) {
+        if (n == 2) break;
+        int row = dd.perkSlot(subStyle, perk);
+        if (row < 1) continue;                       // row 0 is the keystone row
+        if (n == 1 && row == rows[0]) continue;      // same row: cannot pick both
+        chosen[n] = perk;
+        rows[n] = row;
+        ++n;
+    }
+    if (n < 2) {
+        const RuneStyle* sub = nullptr;
+        for (auto& st : dd.runeStyles())
+            if (st.id == subStyle) sub = &st;
+        if (sub) {
+            for (size_t row = 1; row < sub->slots.size() && n < 2; ++row) {
+                if ((int)row == rows[0] || sub->slots[row].empty()) continue;
+                chosen[n] = sub->slots[row][0];
+                rows[n] = (int)row;
+                ++n;
+            }
+        }
+    }
+    return {chosen[0], chosen[1]};
 }
 
 std::string mainTag(const Ddragon& dd, const std::string& champ) {
@@ -122,7 +184,11 @@ bool isTanky(const Ddragon& dd, const std::string& champ) {
 
 // ------------------------------------------------------------------- runes
 
-RunePlan planRunes(const Ddragon& dd, const PlanInput& in) {
+void validateRunePage(const Ddragon& dd, RunePage& page, bool* degraded) {
+    validateRunePageImpl(dd, page, degraded);
+}
+
+RunePlan planRunes(Db& db, const Ddragon& dd, const PlanInput& in) {
     RunePlan plan;
     CompTraits enemy = dd.teamTraits(in.draft.enemyChampions);
     std::string tag = mainTag(dd, in.champion);
@@ -131,60 +197,146 @@ RunePlan planRunes(const Ddragon& dd, const PlanInput& in) {
     bool vsBurst = enemy.burst >= 1.8;
     bool vsCc = enemy.cc >= 2.0;
 
+    // Data first: the page most played on this champion and role in the local
+    // sample. It replaces the class template, not the matchup adjustment below.
+    std::string family = util::patchFamily(dd.version());
+    // The sample is asked for what was played into a comp like this one, so
+    // the keystone answers the matchup and not only popularity.
+    ThreatContext threat;
+    threat.known = !in.draft.enemyChampions.empty();
+    threat.burst = enemy.burst;
+    threat.cc = enemy.cc;
+    auto meta = metaRunes(db, in.champion, in.role, family, threat);
+    std::string metaNote;
+    if (meta) {
+        prim.style = meta->primaryStyle;
+        prim.keystone = meta->perks[0];
+        prim.minors = {meta->perks[1], meta->perks[2], meta->perks[3]};
+        metaNote = "Base: pagina mas jugada en tus partidas. " + meta->sample.note();
+    }
+
     RunePage page;
     page.name = "RiftLoop: " + in.champion + " " + in.role;
     page.primaryStyle = prim.style;
     // Secondary: Resolve against burst/CC pressure, Precision/Sorcery otherwise.
     int sub = vsBurst || vsCc ? kResolve
+            : meta ? meta->subStyle
             : prim.style == kPrecision ? kSorcery : kPrecision;
     if (sub == prim.style) sub = kInspiration;
     page.subStyle = sub;
 
+    // Did the matchup pick the secondary tree, or did the sample? Saying "the
+    // enemy burst punishes you" with no enemy picked would be a claim with no
+    // evidence behind it (PRD 3.3).
+    bool subFromThreat = vsBurst || vsCc;
     page.perks = {prim.keystone, prim.minors[0], prim.minors[1], prim.minors[2]};
+    // Candidates in order of preference. pickSecondary drops anything that
+    // would repeat a row, so a pair the client cannot select never leaves here.
+    std::vector<int> wanted;
     if (sub == kResolve) {
-        page.perks.push_back(8444);   // Second Wind
-        page.perks.push_back(vsCc ? 8242 : 8473);   // Unflinching / Bone Plating
-        page.reasons.push_back(vsCc
-            ? "Rama Valor con tenacidad: la composicion rival tiene CC en cadena"
-            : "Rama Valor defensiva: el burst rival castiga los intercambios largos");
+        // 8444 Second Wind and 8473 Bone Plating share row 2: asking for both
+        // produced a page nobody could select. 8242 Unflinching is row 3.
+        wanted = vsCc ? std::vector<int>{8444, 8242} : std::vector<int>{8473, 8242, 8444};
+        page.reasons.push_back(
+            !subFromThreat ? "Rama Valor de la pagina mas jugada, no de la amenaza rival"
+            : vsCc         ? "Rama Valor con tenacidad: la composicion rival tiene CC en cadena"
+                           : "Rama Valor defensiva: el burst rival castiga los intercambios largos");
     } else if (sub == kPrecision) {
-        page.perks.push_back(9111);
-        page.perks.push_back(9104);
+        wanted = {9111, 9104};
         page.reasons.push_back("Precision secundaria para sostener DPS y resets de pelea");
     } else if (sub == kSorcery) {
-        page.perks.push_back(8226);
-        page.perks.push_back(8236);
+        wanted = {8226, 8236};
         page.reasons.push_back("Hechiceria secundaria: mana y escalado para peleas largas");
     } else {
-        page.perks.push_back(8304);
-        page.perks.push_back(8347);
+        wanted = {8304, 8347};
         page.reasons.push_back("Inspiracion secundaria: tempo de botas y haste");
     }
-    // Stat shards: adaptive + adaptive + (tenacity source not shard) hp.
+    auto [sec1, sec2] = pickSecondary(dd, sub, wanted);
+    page.perks.push_back(sec1);
+    page.perks.push_back(sec2);
+    if (meta && page.subStyle == meta->subStyle && !subFromThreat) {
+        // The sample answers the secondary slots only when no enemy threat
+        // dictated them. A matchup adjustment outranks frequency, and the
+        // stated reason must match the perks that end up on the page.
+        auto [m1, m2] = pickSecondary(dd, page.subStyle, {meta->perks[4], meta->perks[5]});
+        page.perks[4] = m1;
+        page.perks[5] = m2;
+    }
+    if (!metaNote.empty()) page.reasons.insert(page.reasons.begin(), metaNote);
+
+    // Stat shards: adaptive + adaptive + hp. The third slot is the only real
+    // decision here, so it is the one that gets explained.
     page.perks.push_back(5008);
-    page.perks.push_back(5008);
+    page.perks.push_back(vsBurst || vsCc ? 5001 : 5008);
     page.perks.push_back(5001);
+    page.reasons.push_back(vsBurst || vsCc
+        ? "Fragmento de vida en el segundo slot: la amenaza rival es burst o CC, no DPS"
+        : "Dos fragmentos adaptativos: nada en la comp rival obliga a cambiar por vida");
 
     bool degraded = false;
-    validatePage(dd, page, &degraded);
+    validateRunePageImpl(dd, page, &degraded);
     plan.main = page;
-    plan.confidence = degraded ? "baja" : "media";
+    // Confidence follows the sample, never the template.
+    plan.confidence = degraded ? "baja" : meta ? meta->sample.confidence : "baja";
+    // The three reasons are capped at the end, so the warnings go in front: a
+    // reader must not lose them to a template line about shards.
+    if (!meta)
+        plan.main.reasons.insert(
+            plan.main.reasons.begin(),
+            "Sin muestra local suficiente: plantilla por clase, no datos de tu parche");
     if (degraded)
-        plan.main.reasons.push_back(
+        plan.main.reasons.insert(
+            plan.main.reasons.begin(),
             "Parche con runas cambiadas: la pagina se ajusto a las runas existentes; revisala");
 
-    // Situational alternative only when a real strategic reason exists (RF-RUN-002).
-    if (!vsBurst && enemy.sustainedDps >= 1.5) {
+    plan.draftClosed = in.draft.closed();
+    plan.missingPicks = in.draft.missingPicks();
+    // A page built on an open draft can still be invalidated by the next pick.
+    if (!plan.draftClosed && plan.confidence == "alta") plan.confidence = "media";
+
+    // Situational alternative only when a real strategic reason exists
+    // (RF-RUN-002: an alternative must change for a strategy, not for variety).
+    // Each candidate names the threat it answers and the condition that fires it.
+    struct AltCandidate {
+        bool        applies;
+        const char* suffix;
+        int         perk4;
+        int         perk5;
+        const char* reason;
+    };
+    const AltCandidate candidates[] = {
+        // Each pair must come from different rows of Resolve: 8444 is row 2,
+        // 8242/8451/8453 are row 3, 8473 is row 2.
+        {enemy.cc >= 2.0, " (vs CC en cadena)", 8444, 8242,
+         "Alternativa con tenacidad: si el CC dirigido decide las peleas, no el daño"},
+        {enemy.burst >= 1.8, " (vs burst)", 8473, 8451,
+         "Alternativa defensiva: si el burst rival te elimina antes de que juegues"},
+        {enemy.sustainedDps >= 1.5, " (vs DPS sostenido)", 8444, 8453,
+         "Alternativa con sustain: si las peleas largas se deciden por regeneracion"},
+    };
+    for (auto& c : candidates) {
+        if (!c.applies) continue;
+        auto [a1, a2] = pickSecondary(dd, kResolve, {c.perk4, c.perk5});
+        // An alternative equal to the main page teaches nothing.
+        if (page.subStyle == kResolve && page.perks[4] == a1 && page.perks[5] == a2) continue;
         RunePage alt = page;
-        alt.name += " (vs DPS sostenido)";
+        alt.name += c.suffix;
         alt.subStyle = kResolve;
-        alt.perks[4] = 8444;
-        alt.perks[5] = 8453;         // Revitalize
-        alt.reasons = {"Alternativa contra DPS sostenido: sustain en peleas largas"};
+        alt.perks[4] = a1;
+        alt.perks[5] = a2;
+        alt.reasons = {c.reason};
         bool d2 = false;
-        validatePage(dd, alt, &d2);
+        validateRunePageImpl(dd, alt, &d2);
         plan.situational = alt;
+        break;
     }
+    if (!plan.situational)
+        plan.noAlternativeReason =
+            plan.draftClosed
+                ? "La composicion rival no presenta una amenaza que justifique otra pagina"
+                : "Faltan " + std::to_string(plan.missingPicks) +
+                      " picks: la alternativa se decide con el draft cerrado";
+
     if (plan.main.reasons.size() > 3) plan.main.reasons.resize(3);
     return plan;
 }
@@ -246,33 +398,24 @@ ItemPlan planItems(Db& db, const Ddragon& dd, const PlanInput& in) {
     if (plan.starting.empty())
         plan.starting = keepExisting(dd, {2003});
 
-    // Core: the user's own most-built finished items on this champion.
-    std::map<int, int> counts;
-    for (auto& r : db.listMatches(40)) {
-        if (r.userChampion != in.champion) continue;
-        auto m = parseMatch(db.matchJson(r.matchId));
-        if (!m) continue;
-        for (auto& p : m->participants) {
-            if (p.championName != in.champion) continue;
-            for (int id : p.finalItems) {
-                const ItemInfo* it = dd.item(id);
-                if (it && it->depth >= 3 && it->totalGold >= 2200) ++counts[id];
-            }
+    // Core: the local meta sample for this champion and role. It reads the
+    // builds table (every participant of every imported match), not only the
+    // user's own games, and it never reparses the stored match json here.
+    auto meta = metaItems(db, dd, in.champion, in.role, util::patchFamily(dd.version()));
+    if (meta) {
+        for (int id : meta->core) {
+            if (plan.core.size() >= 2) break;
+            plan.core.push_back(id);
         }
+        plan.datasetNote = "Nucleo por frecuencia, no por win rate. " + meta->sample.note() +
+                           ". Sesgo conocido: tus partidas, tu elo y tu region.";
+        plan.confidence = meta->sample.confidence;
+    } else {
+        plan.datasetNote = "Sin muestra local suficiente con " + in.champion + " en " +
+                           (in.role.empty() ? "ese rol" : in.role) +
+                           ": el nucleo queda abierto. Importa mas partidas.";
+        plan.confidence = "baja";
     }
-    std::vector<std::pair<int, int>> ranked(counts.begin(), counts.end());
-    std::sort(ranked.begin(), ranked.end(),
-              [](auto& a, auto& b) { return a.second > b.second; });
-    for (auto& [id, n] : ranked) {
-        if (plan.core.size() >= 2) break;
-        if (n >= 2) plan.core.push_back(id);
-    }
-    plan.datasetNote = plan.core.empty()
-        ? "Sin historial propio suficiente con " + in.champion +
-          ": el nucleo queda abierto. Importa mas partidas para un plan personal."
-        : "Nucleo derivado de tus " + std::to_string(ranked.empty() ? 0 : ranked[0].second) +
-          "+ compras finalizadas con " + in.champion + " en tu historial local (muestra pequeña).";
-    plan.confidence = plan.core.empty() ? "baja" : "media";
     plan.firstBackGold = 900;
     plan.firstBack = {};             // components depend on core; leave open when unknown
 
@@ -282,6 +425,8 @@ ItemPlan planItems(Db& db, const Ddragon& dd, const PlanInput& in) {
         auto ok = keepExisting(dd, ids);
         if (!ok.empty()) plan.boots.push_back({label, ok, cond});
     };
+    if (meta && !meta->boots.empty())
+        addBoots(meta->boots, "Botas mas frecuentes", "Si la partida no cambia la amenaza");
     if (magicShare > 0.45 || enemy.cc >= 2.0)
         addBoots(kBootsMr, "Mercury's Treads", "Si el CC o el daño magico sigue siendo la amenaza");
     if (magicShare < 0.65)

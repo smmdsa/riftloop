@@ -20,7 +20,18 @@ struct Options {
     int         timeoutMs = 8000;
 };
 
-Response get(const std::string& host, int port, bool https,
-             const std::string& path, const Options& opt = {});
+// method: "GET", "POST", ... Body is sent as-is; set a Content-Type header
+// when the endpoint needs one.
+Response request(const std::string& method, const std::string& host, int port, bool https,
+                 const std::string& path, const std::string& body, const Options& opt = {});
+
+inline Response get(const std::string& host, int port, bool https,
+                    const std::string& path, const Options& opt = {}) {
+    return request("GET", host, port, https, path, "", opt);
+}
+inline Response post(const std::string& host, int port, bool https, const std::string& path,
+                     const std::string& body, const Options& opt = {}) {
+    return request("POST", host, port, https, path, body, opt);
+}
 
 } // namespace rl::http

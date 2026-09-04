@@ -14,7 +14,15 @@ struct PlanInput {
     DraftContext draft;              // for threat vectors
 };
 
-RunePlan  planRunes(const Ddragon& dd, const PlanInput& in);
+// Runes prefer the local meta sample (core/meta.h) and fall back to the curated
+// class templates when the sample is too small. The page always says which.
+RunePlan  planRunes(Db& db, const Ddragon& dd, const PlanInput& in);
+
+// Makes a page selectable in the client: keystone from row 0, one primary perk
+// per row, two secondary perks from DIFFERENT rows, one shard per row. Repairs
+// what it can and sets *degraded when it had to change anything. Exposed so a
+// test can prove an impossible page never ships.
+void validateRunePage(const Ddragon& dd, RunePage& page, bool* degraded);
 SpellPlan planSpells(const Ddragon& dd, const PlanInput& in);
 ItemPlan  planItems(Db& db, const Ddragon& dd, const PlanInput& in);
 

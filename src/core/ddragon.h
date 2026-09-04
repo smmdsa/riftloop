@@ -62,6 +62,13 @@ public:
     const ItemInfo* item(int id) const;
     const std::vector<RuneStyle>& runeStyles() const { return styles_; }
     bool  runeExists(int perkId) const;
+    // Row of a perk inside its style, or -1 when it is not there. Row 0 is the
+    // keystone row. Two secondary perks must come from different rows: the
+    // client cannot select two runes of the same row.
+    int   perkSlot(int styleId, int perkId) const;
+    // The three stat shard rows, in order. Shards are not in
+    // runesReforged.json, so this list is curated.
+    const std::vector<std::vector<int>>& shardRows() const;
 
     // Localized display names. Fallback: "#<id>" when unknown.
     std::string perkName(int perkId) const;
