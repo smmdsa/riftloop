@@ -26,6 +26,8 @@ add_library(riftloop_core STATIC ${CORE_SOURCES})
 target_include_directories(riftloop_core PUBLIC src)
 target_link_libraries(riftloop_core PUBLIC sqlite3 nlohmann_json)
 target_link_libraries(riftloop_core PUBLIC winhttp crypt32 shell32 ole32 advapi32)
+# Media Foundation: only videocut.cpp uses it (clip cutting, RF-REC-003).
+target_link_libraries(riftloop_core PUBLIC mfplat mfreadwrite mfuuid propsys)
 
 # --- apps --------------------------------------------------------------------
 add_executable(RiftLoop.Analyzer src/analyzer/analyzer_main.cpp)

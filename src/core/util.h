@@ -4,6 +4,16 @@
 #include <string>
 #include <vector>
 
+namespace rl {
+
+// Version of the whole client. Bump the string on a release; the build stamp
+// comes from the compiler, so two builds of the same day are still tellable
+// apart by the time.
+inline constexpr const char* kAppVersion = "0.2.0";
+inline const char* appBuildStamp() { return __DATE__ " " __TIME__; }
+
+} // namespace rl
+
 namespace rl::util {
 
 // %LOCALAPPDATA%\RiftLoop, created on first call.
