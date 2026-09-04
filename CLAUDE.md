@@ -4,18 +4,51 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Estado del repositorio
 
-Iteración 1 implementada: MVP local sin servidores ni cuentas. C++20 + CMake + SQLite.
-Estructura: `src/core/` (lib estática con toda la lógica), `src/agent|desktop|overlay|analyzer/`
-(un exe cada uno), `tests/` (suite única con fixtures sintéticos + Data Dragon 16.17.1
-vendorizado en `tests/fixtures/ddragon/`). Capture existe como beta opt-in (WGC + MF
-H.264, sin recorte de clips). Las escrituras al cliente no existen en este build.
-La ingesta primaria es el historial del propio cliente (LCU lol-match-history, formato
-v4 convertido a v5 en src/core/lcu_history.cpp); la Riot API con key es fallback de CLI.
-Data Dragon se descarga en el locale del cliente (resolveDataLocale) con iconos en
-cache/img/. El Desktop usa una UI oscura propia: src/desktop/ui.h define el tema, el
-almacén asíncrono de iconos (WM_APP_ICONS) y el control ReportView; el parche se muestra
-con la numeración del cliente via Ddragon::displayPatch (ddragon 16.x -> cliente 26.x).
-[README.md](README.md) documenta el uso.
+MVP local sin servidores ni cuentas. C++20 + CMake + SQLite. Estructura: `src/core/`
+(lib estática con toda la lógica), `src/agent|desktop|overlay|analyzer|capture/` (un exe
+cada uno), `tests/` (suite única con fixtures sintéticos + Data Dragon 16.17.1 vendorizado
+en `tests/fixtures/ddragon/`). Lee [WORK-LOG.md](WORK-LOG.md) antes de tocar nada: tiene el
+detalle de cada decisión y de los bugs que ya se cazaron.
+
+**Fuentes de datos.** La ingesta primaria es el historial del propio cliente (LCU
+`lol-match-history`, v4 convertido a v5 en `src/core/lcu_history.cpp`); la Riot API con key
+es fallback de CLI. Cada partida importada aporta las 10 páginas de runas y las 10 builds
+de esa partida a la tabla `builds`: esa es la muestra local que alimenta runas e items
+(`src/core/meta.cpp`). **No hay ni debe haber scraping de sitios de terceros.** Data Dragon
+se descarga en el locale del cliente (`resolveDataLocale`) con iconos en `cache/img/`.
+
+**Escrituras al cliente.** Existe una y sólo una: la página de runas
+(`src/core/perkpages.cpp`, RF-RUN-003). Va tras `Config::runeWriteEnabled`, apagada por
+defecto, con diff previo, Undo de un paso y auditoría. Gestiona **una** página, la que
+empieza por "RiftLoop", y nunca lee, edita ni borra una página personal; si no hay hueco
+libre, se bloquea en vez de hacer sitio. Cada aplicación necesita un clic humano.
+
+**Video.** Capture graba la ventana del juego (opt-in) y escribe un sidecar
+`<archivo>.mp4.json` con el reloj de partida del momento en que empezó
+(`liveGameTimeSec`): sin ese dato no se puede alinear nada y no se corta. Al analizar,
+`src/core/clipmaker.cpp` corta los momentos de la evidencia con Media Foundation sin
+recodificar y borra el raw, salvo que falle algún corte o `keepFullRecording` esté activo.
+El post-match muestra la playlist con miniaturas y un reproductor embebido con su barra de
+controles (`src/desktop/player.cpp`).
+
+**UI.** Desktop Win32 con UI oscura propia: `src/desktop/ui.h` define el tema, el almacén
+asíncrono de iconos (`WM_APP_ICONS`) y el control `ReportView` (filas clicables vía
+`RVItem::action` + `WM_RV_ACTION`, tarjetas de clip vía `RVKind::ClipCard`). El parche se
+muestra con la numeración del cliente vía `Ddragon::displayPatch` (ddragon 16.x -> cliente
+26.x). [README.md](README.md) documenta el uso.
+
+### CLI del Analyzer (la vía rápida para probar sin UI)
+
+```
+--fetch-lcu [N]   --meta [N]          --plan <Campeon> <ROL> [rivales...]
+--analyze         --autoclip <id>     --clips <id>        --replay-check
+--apply-runes <Campeon> <ROL>         --undo-runes
+--cut-test <mp4> <seg>                --frame <mp4> <seg> <png>
+--report          --show <id>         --wipe
+```
+
+`--frame` vuelca un fotograma a PNG: es la forma de comprobar que un clip cae donde dice
+(el reloj del juego se lee en la esquina superior derecha).
 
 RiftLoop es un compañero nativo de mejora para League of Legends en Windows 10/11 x64.
 El PRD [RiftLoop_PRD_v1.0.md](RiftLoop_PRD_v1.0.md) es la fuente de verdad. Antes de
@@ -98,6 +131,11 @@ Para hotkeys usa `RegisterHotKey` o un mecanismo equivalente de alcance limitado
 ejecuta esa acción. Si se implementa la especificación, se compila fuera de producción (§26).
 La alternativa que sí se envía es **Champion Guard** (`RF-CS-006`): avisos a 10, 5 y 3 segundos,
 respaldo preconfigurado y **una confirmación humana** por clic o hotkey. Sin confirmación, cero acción.
+Champion Guard todavía no está implementado.
+
+La escritura de runas (`RF-RUN-003`, §17.2 **amarillo**) sí está implementada con todas sus
+condiciones. La diferencia entre amarillo y rojo es una acción humana explícita: si algún día
+se añade una ruta que aplique algo sin un clic, deja de ser amarillo.
 
 Toda escritura al cliente de League (runas, hechizos, item sets, Champion Guard) llega detrás de un
 feature flag independiente, apagada por defecto, con diff, Undo de un clic y registro de auditoría
