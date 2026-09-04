@@ -87,7 +87,7 @@ void broadcastState() {
     j["v"] = ipc::kProtocolVersion;
     j["type"] = "state";
     j["state"] = toString(g->state);
-    g->server.broadcast(j.dump());
+    g->server.broadcast(j.dump(), "state");
 }
 
 // Champion-id list -> ddragon name list.
@@ -96,6 +96,22 @@ std::vector<std::string> namesOf(const std::vector<int>& ids) {
     for (int id : ids)
         if (const ChampInfo* c = g->dd.championByKey(id)) out.push_back(c->id);
     return out;
+}
+
+// The draft the Desktop needs to mirror champion select in its own controls.
+// Names, never ids: the UI works with ddragon ids (PRD 14.3, minimal view model).
+json draftView(const ChampSelectView& cs, const DraftContext& ctx) {
+    json d;
+    d["role"] = ctx.role;
+    d["allies"] = ctx.allyChampions;
+    d["enemies"] = ctx.enemyChampions;
+    d["bans"] = ctx.bans;
+    d["pickable"] = ctx.ownedOrPickable;
+    d["locked"] = cs.localChampionId != 0;
+    int mine = cs.localChampionId != 0 ? cs.localChampionId : cs.localHoverChampionId;
+    const ChampInfo* c = mine != 0 ? g->dd.championByKey(mine) : nullptr;
+    d["myChampion"] = c ? c->id : "";
+    return d;
 }
 
 void handleChampSelect() {
@@ -111,10 +127,13 @@ void handleChampSelect() {
     ctx.patch = g->dd.version();
 
     // Recompute only when the draft changed (RF-CS-005).
-    std::string sig = ctx.role + "|" + std::to_string(cs->localChampionId);
+    std::string sig = ctx.role + "|" + std::to_string(cs->localChampionId) + "|" +
+                      std::to_string(cs->localHoverChampionId);
     for (auto& c : ctx.allyChampions) sig += "," + c;
     sig += "|";
     for (auto& c : ctx.enemyChampions) sig += "," + c;
+    sig += "|";
+    for (auto& c : ctx.bans) sig += "," + c;
     if (sig == g->lastDraftSignature) return;
     g->lastDraftSignature = sig;
 
@@ -132,14 +151,15 @@ void handleChampSelect() {
         msg["v"] = 1;
         msg["type"] = "top3";
         msg["data"] = contract;
-        g->server.broadcast(msg.dump());
+        msg["draft"] = draftView(*cs, ctx);
+        g->server.broadcast(msg.dump(), "draft");
     } else if (const ChampInfo* mine = g->dd.championByKey(cs->localChampionId)) {
         // Locked: full pregame plan + quiz.
         PlanInput pi;
         pi.champion = mine->id;
         pi.role = ctx.role;
         pi.draft = ctx;
-        RunePlan runes = planRunes(g->dd, pi);
+        RunePlan runes = planRunes(*g->db, g->dd, pi);
         SpellPlan spells = planSpells(g->dd, pi);
         ItemPlan items = planItems(*g->db, g->dd, pi);
         auto quiz = buildQuiz(g->dd, pi);
@@ -150,10 +170,18 @@ void handleChampSelect() {
         payload["runes"] = runes;
         payload["spells"] = spells;
         payload["items"] = items;
+        // RF-RUN-001: the page is generated once the pick is stable, and it is
+        // marked final only when the ten champions are visible.
+        std::string uncertainty =
+            ctx.closed() ? "Draft cerrado: los 10 campeones son visibles; falta el matchup real"
+                         : "Draft incompleto: faltan " + std::to_string(ctx.missingPicks()) +
+                               " picks; el plan se rehace al cerrarse";
         json contract = makeContract("pregame_plan", ctx.patch,
                                      json{{"champion", pi.champion}, {"role", pi.role},
-                                          {"enemies", ctx.enemyChampions}},
-                                     payload, items.confidence, "matchup de linea sin confirmar");
+                                          {"enemies", ctx.enemyChampions},
+                                          {"draft_closed", ctx.closed()},
+                                          {"known_picks", ctx.knownPicks()}},
+                                     payload, items.confidence, uncertainty);
         g->db->saveRecommendation("pregame_plan", contract.dump());
         g->db->saveRecommendation("quiz", json(quiz).dump());
 
@@ -162,7 +190,8 @@ void handleChampSelect() {
         msg["type"] = "plan";
         msg["data"] = contract;
         msg["quiz"] = quiz;
-        g->server.broadcast(msg.dump());
+        msg["draft"] = draftView(*cs, ctx);
+        g->server.broadcast(msg.dump(), "draft");
 
         // Prefetch icons so the overlay draws from local files only.
         std::vector<std::pair<std::string, std::string>> downloads;   // id, url
@@ -183,6 +212,9 @@ void onEnterState(GameState prev, GameState next) {
     g->db->audit("state_change", json{{"from", toString(prev)}, {"to", toString(next)}}.dump());
 
     if (next == GameState::ChampSelect) g->lastDraftSignature.clear();
+    // The draft belongs to one champion select only; do not replay a stale one.
+    if (prev == GameState::ChampSelect && next != GameState::ChampSelect)
+        g->server.clearSticky("draft");
 
     if (next == GameState::Loading && prev == GameState::ChampSelect) {
         json msg;
@@ -280,6 +312,15 @@ void poll() {
             PostMessageW(hwnd, WM_APP_HISTORY, 0, (LPARAM)newest);
             g->historyCheckRunning = false;
         }).detach();
+    }
+
+    // Daily local meta refresh: one larger history import per day, at a calm
+    // moment, in the low-priority Analyzer. It never runs during a game.
+    if (calmState && !g->analyzerRunning && g->db->getKv("last_meta_refresh") != util::todayLocal()) {
+        g->db->setKv("last_meta_refresh", util::todayLocal());   // mark first: no retry loop
+        g->analyzerRunning = true;
+        spawn(L"RiftLoop.Analyzer.exe", L"--meta", &g->analyzerProcess);
+        g->db->audit("meta_refresh_started", "{}");
     }
 
     // Analyzer finished? Tell the Desktop.

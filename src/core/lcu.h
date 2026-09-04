@@ -19,11 +19,18 @@ struct LcuConnection {
 struct ChampSelectView {
     std::string assignedRole;            // TOP/JUNGLE/MIDDLE/BOTTOM/UTILITY
     int         localChampionId = 0;     // 0 = not locked
-    std::vector<int> allyChampionIds;    // excluding local player
+    int         localHoverChampionId = 0;  // pick intent before the lock
+    std::vector<int> allyChampionIds;    // locked pick or hover, excluding local player
     std::vector<int> enemyChampionIds;
-    std::vector<int> banIds;
+    std::vector<int> banIds;             // completed bans, both teams, in draft order
     std::vector<int> pickableChampionIds;
 };
+
+// Pure parser for the LCU champ select payloads. The session shape is the one
+// of /lol-champ-select/v1/session; pickableJson is the array returned by
+// /lol-champ-select/v1/pickable-champion-ids. Exposed for tests.
+std::optional<ChampSelectView> parseChampSelect(const std::string& sessionJson,
+                                                const std::string& pickableJson);
 
 struct LcuSummoner {
     std::string puuid;
@@ -56,12 +63,34 @@ public:
 
     GameState toGameState(const std::string& phase) const;
 
+    // Raw access for modules that need endpoints beyond the ones above
+    // (core/replays.h). Both return "" on error. POST bodies are JSON.
+    std::string getRaw(const std::string& path, int timeoutMs = 2000);
+    bool        postRaw(const std::string& path, const std::string& jsonBody,
+                        std::string* response = nullptr, int timeoutMs = 4000);
+    // Any verb. Used by the rune page writer, the only module that needs
+    // PUT and DELETE, and only on the page RiftLoop owns (PRD 9.5).
+    bool        requestRaw(const std::string& method, const std::string& path,
+                           const std::string& jsonBody, std::string* response = nullptr,
+                           int timeoutMs = 4000);
+
 private:
     std::string get(const std::string& path);
     LcuConnection conn_;
 };
 
-// Live Client Data API (game process, 127.0.0.1:2999). Liveness only.
+// Live Client Data API (game process, 127.0.0.1:2999).
 bool liveGameRunning();
+
+// Seconds elapsed in the running game, or -1 when no game answers. This is the
+// only reliable way to align a recording with the match clock: recording starts
+// when the agent notices the game, not at minute zero (RF-REC-003).
+double liveGameTimeSec();
+
+// Seconds the Live Client Data clock had already counted when the match clock
+// hit 0:00. The API starts counting when the game process starts; the Riot
+// timeline counts from 0:00. Without this offset a cut lands minutes away.
+// Returns -1 when no game answers or the event is not there yet.
+double liveGameStartOffsetSec();
 
 } // namespace rl

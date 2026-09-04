@@ -25,7 +25,10 @@ public:
     ~Server();
     void start();
     void stop();
-    void broadcast(const std::string& jsonText);
+    // A non-empty stickyKey keeps the message and replays it to every client
+    // that connects later. A newer message with the same key replaces it.
+    void broadcast(const std::string& jsonText, const std::string& stickyKey = "");
+    void clearSticky(const std::string& stickyKey);
 
 private:
     struct Impl;

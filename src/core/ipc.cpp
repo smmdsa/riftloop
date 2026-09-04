@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <mutex>
+#include <utility>
 
 namespace rl::ipc {
 
@@ -39,6 +40,10 @@ struct Server::Impl {
     std::thread acceptThread;
     std::mutex clientsMutex;
     std::vector<HANDLE> clients;
+    // Last message per sticky key, in first-sent order. A Desktop that starts
+    // in the middle of champion select needs the current draft, not the next
+    // change (PRD 14.3: the client receives a view model, not a database).
+    std::vector<std::pair<std::string, std::string>> sticky;
 
     void acceptLoop() {
         while (running) {
@@ -53,15 +58,25 @@ struct Server::Impl {
             if (!running) { CloseHandle(pipe); break; }
             if (ok) {
                 std::lock_guard lk(clientsMutex);
-                clients.push_back(pipe);
+                bool alive = true;
+                for (auto& [key, text] : sticky)
+                    if (alive && !writeFrame(pipe, text)) alive = false;
+                if (alive) clients.push_back(pipe);
+                else CloseHandle(pipe);
             } else {
                 CloseHandle(pipe);
             }
         }
     }
 
-    void broadcast(const std::string& text) {
+    void broadcast(const std::string& text, const std::string& stickyKey) {
         std::lock_guard lk(clientsMutex);
+        if (!stickyKey.empty()) {
+            bool found = false;
+            for (auto& kv : sticky)
+                if (kv.first == stickyKey) { kv.second = text; found = true; break; }
+            if (!found) sticky.push_back({stickyKey, text});
+        }
         for (auto it = clients.begin(); it != clients.end();) {
             if (!writeFrame(*it, text)) {
                 CloseHandle(*it);
@@ -82,6 +97,7 @@ struct Server::Impl {
         std::lock_guard lk(clientsMutex);
         for (auto h2 : clients) CloseHandle(h2);
         clients.clear();
+        sticky.clear();
     }
 };
 
@@ -93,7 +109,14 @@ void Server::start() {
     impl_->acceptThread = std::thread([this] { impl_->acceptLoop(); });
 }
 void Server::stop() { if (impl_->running) impl_->stopAll(); }
-void Server::broadcast(const std::string& jsonText) { impl_->broadcast(jsonText); }
+void Server::broadcast(const std::string& jsonText, const std::string& stickyKey) {
+    impl_->broadcast(jsonText, stickyKey);
+}
+void Server::clearSticky(const std::string& stickyKey) {
+    std::lock_guard lk(impl_->clientsMutex);
+    for (auto it = impl_->sticky.begin(); it != impl_->sticky.end(); ++it)
+        if (it->first == stickyKey) { impl_->sticky.erase(it); return; }
+}
 
 // ------------------------------------------------------------------ client
 

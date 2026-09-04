@@ -95,6 +95,36 @@ std::string Lcu::get(const std::string& path) {
     return r.status == 200 ? r.body : "";
 }
 
+std::string Lcu::getRaw(const std::string& path, int timeoutMs) {
+    if (!connected()) return "";
+    http::Options opt;
+    opt.ignoreCertErrors = true;
+    opt.basicUser = "riot";
+    opt.basicPass = conn_.password;
+    opt.timeoutMs = timeoutMs;
+    auto r = http::get("127.0.0.1", conn_.port, true, path, opt);
+    return r.status == 200 ? r.body : "";
+}
+
+bool Lcu::requestRaw(const std::string& method, const std::string& path,
+                     const std::string& jsonBody, std::string* response, int timeoutMs) {
+    if (!connected()) return false;
+    http::Options opt;
+    opt.ignoreCertErrors = true;
+    opt.basicUser = "riot";
+    opt.basicPass = conn_.password;
+    opt.timeoutMs = timeoutMs;
+    opt.headers["Content-Type"] = "application/json";
+    auto r = http::request(method, "127.0.0.1", conn_.port, true, path, jsonBody, opt);
+    if (response) *response = r.body;
+    return r.status >= 200 && r.status < 300;
+}
+
+bool Lcu::postRaw(const std::string& path, const std::string& jsonBody, std::string* response,
+                  int timeoutMs) {
+    return requestRaw("POST", path, jsonBody, response, timeoutMs);
+}
+
 std::string Lcu::gameflowPhase() {
     std::string body = get("/lol-gameflow/v1/gameflow-phase");
     if (body.size() >= 2 && body.front() == '"' && body.back() == '"')
@@ -102,45 +132,70 @@ std::string Lcu::gameflowPhase() {
     return {};
 }
 
-std::optional<ChampSelectView> Lcu::champSelect() {
-    std::string body = get("/lol-champ-select/v1/session");
-    if (body.empty()) return std::nullopt;
+namespace {
+
+void addUnique(std::vector<int>& out, int id) {
+    if (id <= 0) return;
+    for (int v : out) if (v == id) return;
+    out.push_back(id);
+}
+
+} // namespace
+
+std::optional<ChampSelectView> parseChampSelect(const std::string& sessionJson,
+                                                const std::string& pickableJson) {
+    if (sessionJson.empty()) return std::nullopt;
     try {
-        json j = json::parse(body);
+        json j = json::parse(sessionJson);
         ChampSelectView v;
         int localCell = j.value("localPlayerCellId", -1);
         for (auto& p : j.value("myTeam", json::array())) {
             int champ = p.value("championId", 0);
+            int hover = p.value("championPickIntent", 0);
             if (p.value("cellId", -2) == localCell) {
                 v.localChampionId = champ;
+                v.localHoverChampionId = hover;
                 v.assignedRole = p.value("assignedPosition", "");
                 // LCU uses lowercase ("bottom"); normalize to match-v5 casing.
                 for (auto& ch : v.assignedRole) ch = (char)toupper((unsigned char)ch);
                 if (v.assignedRole == "BOT") v.assignedRole = "BOTTOM";
-            } else if (champ > 0) {
-                v.allyChampionIds.push_back(champ);
+            } else {
+                // Before the lock the client shows the ally hover; use it.
+                addUnique(v.allyChampionIds, champ > 0 ? champ : hover);
             }
         }
         for (auto& p : j.value("theirTeam", json::array())) {
             int champ = p.value("championId", 0);
-            if (champ > 0) v.enemyChampionIds.push_back(champ);
+            addUnique(v.enemyChampionIds, champ > 0 ? champ : p.value("championPickIntent", 0));
         }
+        // Bans live in two places. The summary lists fill late in some client
+        // builds, so read the completed ban actions too (RF-CS-001).
+        for (auto& group : j.value("actions", json::array()))
+            for (auto& a : group)
+                if (a.value("type", "") == "ban" && a.value("completed", false))
+                    addUnique(v.banIds, a.value("championId", 0));
         if (j.contains("bans")) {
             for (auto& b : j["bans"].value("myTeamBans", json::array()))
-                if (b.get<int>() > 0) v.banIds.push_back(b.get<int>());
+                addUnique(v.banIds, b.get<int>());
             for (auto& b : j["bans"].value("theirTeamBans", json::array()))
-                if (b.get<int>() > 0) v.banIds.push_back(b.get<int>());
+                addUnique(v.banIds, b.get<int>());
         }
-        std::string pickable = get("/lol-champ-select/v1/pickable-champion-ids");
-        if (!pickable.empty()) {
+        if (!pickableJson.empty()) {
             try {
-                for (auto& id : json::parse(pickable)) v.pickableChampionIds.push_back(id.get<int>());
+                for (auto& id : json::parse(pickableJson))
+                    v.pickableChampionIds.push_back(id.get<int>());
             } catch (...) {}
         }
         return v;
     } catch (...) {
         return std::nullopt;
     }
+}
+
+std::optional<ChampSelectView> Lcu::champSelect() {
+    std::string body = get("/lol-champ-select/v1/session");
+    if (body.empty()) return std::nullopt;
+    return parseChampSelect(body, get("/lol-champ-select/v1/pickable-champion-ids"));
 }
 
 std::optional<LcuSummoner> Lcu::currentSummoner() {
@@ -216,6 +271,33 @@ bool liveGameRunning() {
     opt.timeoutMs = 900;
     auto r = http::get("127.0.0.1", 2999, true, "/liveclientdata/gamestats", opt);
     return r.status == 200;
+}
+
+double liveGameStartOffsetSec() {
+    http::Options opt;
+    opt.ignoreCertErrors = true;
+    opt.timeoutMs = 1500;
+    auto r = http::get("127.0.0.1", 2999, true, "/liveclientdata/eventdata", opt);
+    if (r.status != 200) return -1;
+    try {
+        json j = json::parse(r.body);
+        for (auto& e : j.value("Events", json::array()))
+            if (e.value("EventName", "") == "GameStart") return e.value("EventTime", -1.0);
+    } catch (...) {}
+    return -1;
+}
+
+double liveGameTimeSec() {
+    http::Options opt;
+    opt.ignoreCertErrors = true;
+    opt.timeoutMs = 1500;
+    auto r = http::get("127.0.0.1", 2999, true, "/liveclientdata/gamestats", opt);
+    if (r.status != 200) return -1;
+    try {
+        return json::parse(r.body).value("gameTime", -1.0);
+    } catch (...) {
+        return -1;
+    }
 }
 
 } // namespace rl
