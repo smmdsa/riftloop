@@ -58,7 +58,7 @@ void drawBitmap(HDC dc, HBITMAP bmp, int x, int y, int size);
 
 // ------------------------------------------------------------- report view
 // Item kinds for the ReportView control.
-enum class RVKind { Title, Section, Text, Dim, IconRow, Badge, Spacer };
+enum class RVKind { Title, Section, Text, Dim, IconRow, Badge, Spacer, ClipCard };
 
 struct RVItem {
     RVKind kind = RVKind::Text;
@@ -67,11 +67,27 @@ struct RVItem {
     std::string iconKind, iconId, iconUrl;   // IconRow / Title portrait
     COLORREF color = 0;              // 0 = default for the kind
     int indent = 0;                  // extra left indent in px
+    // Non-empty makes the row clickable: the view posts WM_RV_ACTION to its
+    // parent and the parent reads the string back with rvActionAt().
+    std::string action;
+    // ClipCard only: thumbnail on the left and a second line under the title.
+    // The view draws the bitmap but never owns it; the caller frees it.
+    HBITMAP      thumb = nullptr;
+    std::wstring subtitle;
+    bool         selected = false;
 };
+
+// wParam = item index, lParam = the view HWND.
+inline constexpr UINT WM_RV_ACTION = WM_APP + 60;
 
 // Registers the "RiftLoopReport" window class. Call once before CreateWindow.
 void registerReportView(HINSTANCE inst);
 // Replaces the content of a report view and repaints.
 void rvSet(HWND view, std::vector<RVItem> items);
+// Action string of an item, "" when the index has none.
+std::string rvActionAt(HWND view, int index);
+// Marks one item as selected and clears the rest, then repaints. Used by the
+// clip playlist so the card being played is obvious.
+void rvHighlight(HWND view, int index);
 
 } // namespace rlui

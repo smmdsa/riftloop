@@ -11,6 +11,12 @@
 #include "core/ipc.h"
 #include "core/lcu.h"
 #include "core/lcu_history.h"
+#include "core/clipmaker.h"
+#include "core/replays.h"
+#include "core/videoframe.h"
+
+#include "player.h"
+#include "core/perkpages.h"
 #include "core/missions.h"
 #include "core/patchimpact.h"
 #include "core/planner.h"
@@ -20,6 +26,7 @@
 #include "ui.h"
 
 #include <windows.h>
+#include <shellapi.h>
 #include <windowsx.h>
 #include <commctrl.h>
 #include <commdlg.h>
@@ -27,6 +34,7 @@
 
 #include <algorithm>
 #include <map>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -58,6 +66,8 @@ enum : int {
     // postmatch
     IDC_POST_VIEW = 1300, IDC_FB_OK, IDC_FB_PARTIAL, IDC_FB_WRONG, IDC_FB_CTX,
     IDC_ACCEPT_MISSION,
+    IDC_CLIP_LIST = 1320, IDC_CLIP_PLAYER, IDC_CLIP_STATUS, IDC_CLIP_PROGRESS,
+    IDC_CLIP_PLAYPAUSE, IDC_CLIP_CLOSE, IDC_CLIP_FULL,
     // mission
     IDC_MISSION_VIEW = 1400, IDC_SUGGEST_MISSION, IDC_SKILLS_LIST, IDC_MISSION_REFRESH,
     // draft
@@ -65,17 +75,23 @@ enum : int {
     IDC_DRAFT_VIEW,
     IDC_DRAFT_ALLY0 = 1520,          // ..1523
     IDC_DRAFT_ENEMY0 = 1530,         // ..1534
+    IDC_DRAFT_BANS = 1540, IDC_APPLY_RUNES, IDC_UNDO_RUNES,
     // patch
     IDC_PATCH_VIEW = 1600, IDC_PATCH_REFRESH,
     // settings
     IDC_SET_OVERLAY = 1700, IDC_SET_LCU, IDC_SET_CAPTURE, IDC_SET_LOCKFILE, IDC_SET_SAVE,
-    IDC_SET_WIPE, IDC_SET_AUDIT, IDC_SET_VIEW,
+    IDC_SET_WIPE, IDC_SET_AUDIT, IDC_SET_VIEW, IDC_SET_META, IDC_SET_CLIPS,
+    IDC_OPEN_CLIPS, IDC_PRUNE_CLIPS, IDC_SET_KEEPFULL,
+    IDC_MAKE_CLIPS, IDC_SET_RUNEWRITE,
     // quiz window
     IDC_QUIZ_OPT0 = 1800,            // ..1803
     IDC_QUIZ_NEXT = 1810,
 };
 
 constexpr UINT WM_APP_IPC = WM_APP + 10;
+constexpr UINT WM_APP_CLIPS = WM_APP + 11;      // wParam: 1 progress, 2 done
+// PRD 13.4: full recordings are capped at 2 GB of local storage.
+constexpr int64_t kRecordingQuotaBytes = 2LL * 1024 * 1024 * 1024;
 constexpr int kPages = 7;
 const wchar_t* kPageNames[kPages] = {L"Perfil", L"Partidas", L"Post-match", L"Misión",
                                      L"Draft Lab", L"Parche", L"Ajustes"};
@@ -89,7 +105,9 @@ const wchar_t* kPageSubtitles[kPages] = {
     L"Módulos, privacidad y auditoría"};
 
 constexpr int kSidebarW = 200;
-constexpr int kWinW = 1180, kWinH = 780;
+constexpr int kWinW = 1560, kWinH = 900;
+// Right-hand column of the post-match page: player on top, clip cards below.
+constexpr int kClipPanelW = 430;
 const char* kRoles[5] = {"TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"};
 
 struct App {
@@ -111,7 +129,26 @@ struct App {
     std::unique_ptr<ipc::Client> client;
     std::string agentState = "sin agente";
 
+    // Draft mirrored from the agent. Bans and the pickable set have no combo of
+    // their own, so the Draft Lab keeps them here for a manual recompute.
+    std::vector<std::string> draftBans;
+    std::vector<std::string> draftPickable;
+
+    // Last rune page shown. Applying writes exactly this, never something
+    // recomputed behind the user's back.
+    RunePage lastRunePage;
+    std::string lastPlanChampion, lastPlanRole;
+
     std::string currentMatchId;
+
+    // clip playlist and player
+    HWND playerWnd = nullptr;        // kept directly: the player is not a dialog control
+    std::vector<HBITMAP> clipThumbBitmaps;
+    std::vector<std::string> clipRowFiles;
+    std::unique_ptr<VideoPlayer> player;
+    std::mutex clipMutex;
+    std::string clipStatus;
+    int clipStep = 0, clipTotal = 0;
 
     // quiz
     HWND quizWnd = nullptr;
@@ -129,6 +166,14 @@ App* g = nullptr;
 // ------------------------------------------------------------------ helpers
 
 std::wstring w(const std::string& s) { return util::widen(s); }
+
+// Folder of the running executable, to launch the sibling processes.
+std::wstring exeDirW() {
+    wchar_t buf[MAX_PATH];
+    GetModuleFileNameW(nullptr, buf, MAX_PATH);
+    std::wstring path = buf;
+    return path.substr(0, path.find_last_of(L'\\'));
+}
 std::string n(HWND ctl) {
     wchar_t buf[2048];
     GetWindowTextW(ctl, buf, 2048);
@@ -155,6 +200,25 @@ void fillChampCombo(HWND cb) {
         SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)name.c_str());
     SendMessageW(cb, CB_SETCURSEL, 0, 0);
 }
+void selectChampCombo(int ctlId, const std::string& champId) {
+    HWND cb = ctl(ctlId);
+    if (!cb) return;
+    int sel = 0;                         // index 0 is the empty dash
+    for (size_t i = 0; i < g->champList.size(); ++i)
+        if (g->champList[i].second == champId) { sel = (int)i + 1; break; }
+    SendMessageW(cb, CB_SETCURSEL, sel, 0);
+}
+
+void selectRoleCombo(int ctlId, const std::string& role, bool withNone) {
+    HWND cb = ctl(ctlId);
+    if (!cb) return;
+    for (int i = 0; i < 5; ++i)
+        if (role == kRoles[i]) {
+            SendMessageW(cb, CB_SETCURSEL, withNone ? i + 1 : i, 0);
+            return;
+        }
+}
+
 std::string comboChampId(int ctlId) {
     int sel = (int)SendMessageW(ctl(ctlId), CB_GETCURSEL, 0, 0);
     if (sel <= 0 || sel > (int)g->champList.size()) return {};
@@ -320,11 +384,20 @@ std::vector<RVItem> rvPlan(const std::string& champ, const std::string& role, co
                                       w(g->dd.shardName(rp.main.perks[7])) + L" · " +
                                       w(g->dd.shardName(rp.main.perks[8]))});
         for (auto& r : rp.main.reasons) v.push_back({RVKind::Dim, L"• " + w(r)});
+        // RF-RUN-001: say whether the draft can still change this page.
+        v.push_back({RVKind::Dim, rp.draftClosed
+            ? std::wstring(L"Plan definitivo: los 10 campeones estan bloqueados")
+            : L"Plan provisional: faltan " + std::to_wstring(rp.missingPicks) +
+                  L" picks; se rehace al cerrarse el draft"});
         if (rp.situational && rp.situational->perks.size() >= 6) {
             v.push_back({RVKind::Dim,
                          L"Alternativa: " + w(g->dd.styleName(rp.situational->subStyle)) +
                              L" secundaria con " + w(g->dd.perkName(rp.situational->perks[4])) +
                              L" + " + w(g->dd.perkName(rp.situational->perks[5]))});
+            for (auto& r : rp.situational->reasons)
+                v.push_back({RVKind::Dim, L"   " + w(r)});
+        } else if (!rp.noAlternativeReason.empty()) {
+            v.push_back({RVKind::Dim, L"Sin alternativa: " + w(rp.noAlternativeReason)});
         }
     }
 
@@ -373,6 +446,8 @@ std::vector<RVItem> rvPlan(const std::string& champ, const std::string& role, co
     return v;
 }
 
+void refreshClipList();
+
 std::vector<RVItem> rvAnalysis(const AnalysisResult& a, const MatchRow* row) {
     std::vector<RVItem> v;
     RVItem title{RVKind::Title, row ? w(champDisplay(row->userChampion)) + L" · " +
@@ -420,6 +495,15 @@ std::vector<RVItem> rvAnalysis(const AnalysisResult& a, const MatchRow* row) {
             RVItem exc{RVKind::Dim, L"Exclusiones: " + w(ev.exclusionsChecked)};
             exc.indent = 24;
             v.push_back(exc);
+            // The clip that shows this exact moment. Clicking it opens the file
+            // so the text can be checked against the video (PRD 9.11 evidence).
+            if (!ev.clipFile.empty()) {
+                RVItem clip{RVKind::Dim, L"▶ Ver este momento en video"};
+                clip.indent = 24;
+                clip.color = theme::kAccent;
+                clip.action = "clip:" + ev.clipFile;
+                v.push_back(clip);
+            }
         }
     }
     if (shown == 0)
@@ -500,6 +584,47 @@ std::vector<RVItem> rvPatch() {
     return v;
 }
 
+// Full-game recordings are named by timestamp (20260904_011134.mp4). Evidence
+// clips carry a match id instead, and must survive any cleanup: they are the
+// proof behind a diagnosis.
+bool isFullRecording(const std::string& name) {
+    if (name.size() < 16 || name[8] != '_') return false;
+    for (int i = 0; i < 8; ++i)
+        if (!isdigit((unsigned char)name[i])) return false;
+    return true;
+}
+
+struct RecordingsInfo {
+    int      files = 0;
+    int64_t  bytes = 0;
+    int      clipFiles = 0;
+};
+
+RecordingsInfo recordingsInfo() {
+    RecordingsInfo info;
+    std::error_code ec;
+    auto dir = util::dataDir() / "clips";
+    if (!std::filesystem::exists(dir, ec)) return info;
+    for (auto& e : std::filesystem::directory_iterator(dir, ec)) {
+        if (!e.is_regular_file(ec)) continue;
+        if (isFullRecording(e.path().filename().string())) {
+            ++info.files;
+            info.bytes += (int64_t)e.file_size(ec);
+        } else {
+            ++info.clipFiles;
+        }
+    }
+    return info;
+}
+
+std::wstring humanSize(int64_t bytes) {
+    double gb = (double)bytes / (1024.0 * 1024.0 * 1024.0);
+    wchar_t buf[32];
+    if (gb >= 1.0) swprintf_s(buf, L"%.1f GB", gb);
+    else swprintf_s(buf, L"%.0f MB", (double)bytes / (1024.0 * 1024.0));
+    return buf;
+}
+
 std::vector<RVItem> rvSettingsInfo() {
     Config cfg = Config::load();
     std::vector<RVItem> v;
@@ -509,7 +634,16 @@ std::vector<RVItem> rvSettingsInfo() {
                                                            L" (Data Dragon " + w(g->dd.version()) +
                                                            L", " + w(g->dd.locale()) + L")"
                                                      : std::wstring(L"no disponibles"))});
+    v.push_back({RVKind::Text, L"Versión: " + w(kAppVersion) + L" · compilado " +
+                                   w(appBuildStamp())});
     v.push_back({RVKind::Text, L"Carpeta local: " + util::widen(util::dataDir().string())});
+    std::string last = g->db->getKv("last_meta_refresh");
+    v.push_back({RVKind::Text, L"Muestra local de builds: " + w(std::to_string(g->db->buildCount())) +
+                                   L" (ultimo refresco: " +
+                                   (last.empty() ? std::wstring(L"nunca") : w(last)) + L")"});
+    v.push_back({RVKind::Dim, L"Runas y builds salen de tus propias partidas: cada partida "
+                              L"importada aporta las 10 páginas y las 10 builds de esa "
+                              L"partida. No se consulta ningún sitio de terceros."});
     v.push_back({RVKind::Section, L"Privacidad"});
     v.push_back({RVKind::Dim, L"Todo se guarda en tu equipo (SQLite local). Este build no "
                               L"escribe nada en el cliente de League y no envía datos a "
@@ -517,6 +651,23 @@ std::vector<RVItem> rvSettingsInfo() {
     v.push_back({RVKind::Dim, L"Grabación: " + std::wstring(cfg.captureEnabled
                                                                 ? L"activada (beta, MP4 local)"
                                                                 : L"desactivada (opt-in)")});
+    RecordingsInfo rec = recordingsInfo();
+    std::wstring recLine = L"Grabaciones: " + std::to_wstring(rec.files) + L" archivos · " +
+                           humanSize(rec.bytes) + L" (límite recomendado 2 GB)";
+    if (rec.clipFiles > 0)
+        recLine += L" · " + std::to_wstring(rec.clipFiles) + L" clips de evidencia";
+    RVItem recItem{RVKind::Text, recLine};
+    if (rec.bytes > kRecordingQuotaBytes) recItem.color = theme::kWarn;
+    v.push_back(recItem);
+    v.push_back({RVKind::Dim, cfg.keepFullRecording
+        ? L"Al analizar cada partida se cortan los clips de evidencia y se conserva también "
+          L"la grabación completa (~1 GB por hora)."
+        : L"Al analizar cada partida se cortan los clips de evidencia y se borra la "
+          L"grabación completa. Si algún corte falla, la grabación se conserva."});
+    if (rec.bytes > kRecordingQuotaBytes)
+        v.push_back({RVKind::Dim, L"Superas el límite. \"Liberar espacio\" borra las grabaciones "
+                                  L"completas más antiguas hasta bajar de 2 GB. Los clips de "
+                                  L"evidencia no se tocan."});
     return v;
 }
 
@@ -629,6 +780,7 @@ void showAnalysis(const std::string& matchId) {
     for (auto& r : g->db->listMatches(100))
         if (r.matchId == matchId) { rowCopy = r; rowPtr = &rowCopy; break; }
     rvSet(ctl(IDC_POST_VIEW), rvAnalysis(*a, rowPtr));
+    refreshClipList();
     switchPage(2);
 }
 
@@ -637,6 +789,9 @@ void refreshSettings() {
     CheckDlgButton(g->hwnd, IDC_SET_OVERLAY, cfg.overlayEnabled ? BST_CHECKED : 0);
     CheckDlgButton(g->hwnd, IDC_SET_LCU, cfg.lcuReadEnabled ? BST_CHECKED : 0);
     CheckDlgButton(g->hwnd, IDC_SET_CAPTURE, cfg.captureEnabled ? BST_CHECKED : 0);
+    CheckDlgButton(g->hwnd, IDC_SET_CLIPS, cfg.clipsEnabled ? BST_CHECKED : 0);
+    CheckDlgButton(g->hwnd, IDC_SET_RUNEWRITE, cfg.runeWriteEnabled ? BST_CHECKED : 0);
+    CheckDlgButton(g->hwnd, IDC_SET_KEEPFULL, cfg.keepFullRecording ? BST_CHECKED : 0);
     setText(IDC_SET_LOCKFILE, cfg.leagueLockfilePath);
     rvSet(ctl(IDC_SET_VIEW), rvSettingsInfo());
 }
@@ -814,8 +969,61 @@ DraftContext draftContextFromUi() {
         std::string id = comboChampId(IDC_DRAFT_ENEMY0 + i);
         if (!id.empty()) ctx.enemyChampions.push_back(id);
     }
+    ctx.bans = g->draftBans;
+    // The pickable set is only true while the client is in champion select.
+    if (g->agentState == "ChampSelect") ctx.ownedOrPickable = g->draftPickable;
     ctx.patch = g->ddOk ? g->dd.version() : "";
     return ctx;
+}
+
+// Mirrors the live champion select into the Draft Lab controls. The user can
+// still edit them; the next draft change overwrites the edit.
+void applyDraftView(const json& d) {
+    selectRoleCombo(IDC_DRAFT_ROLE, d.value("role", ""), false);
+    selectChampCombo(IDC_DRAFT_CHAMP, d.value("myChampion", ""));
+    auto allies = d.value("allies", std::vector<std::string>{});
+    for (int i = 0; i < 4; ++i)
+        selectChampCombo(IDC_DRAFT_ALLY0 + i, i < (int)allies.size() ? allies[i] : "");
+    auto enemies = d.value("enemies", std::vector<std::string>{});
+    for (int i = 0; i < 5; ++i)
+        selectChampCombo(IDC_DRAFT_ENEMY0 + i, i < (int)enemies.size() ? enemies[i] : "");
+
+    g->draftBans = d.value("bans", std::vector<std::string>{});
+    g->draftPickable = d.value("pickable", std::vector<std::string>{});
+
+    std::string bans;
+    for (auto& b : g->draftBans) bans += (bans.empty() ? "" : ", ") + champDisplay(b);
+    setText(IDC_DRAFT_BANS, bans.empty() ? "Baneos: todavia ninguno"
+                                         : "Baneos (" + std::to_string(g->draftBans.size()) +
+                                               "): " + bans);
+}
+
+void clearDraftView() {
+    g->draftBans.clear();
+    g->draftPickable.clear();
+    setText(IDC_DRAFT_BANS, "Baneos: -");
+}
+
+// Rebuilds the local meta sample: a larger history import, the rune backfill
+// for older matches, then the builds table. Runs off the UI thread.
+void refreshMetaSample() {
+    EnableWindow(ctl(IDC_SET_META), FALSE);
+    setText(IDC_SET_META, "Actualizando...");
+    std::thread([] {
+        int rows = -1;
+        try {
+            Db db;
+            Config cfg = Config::load();
+            Lcu lcu;
+            if (lcu.connect(cfg.leagueLockfilePath)) {
+                importFromClient(db, lcu, g->ddOk ? &g->dd : nullptr, cfg.metaImportCount);
+                refetchRunePages(db, lcu, g->ddOk ? &g->dd : nullptr);
+            }
+            rows = db.rebuildBuilds(g->ddOk ? &g->dd : nullptr);
+            db.setKv("last_meta_refresh", util::todayLocal());
+        } catch (...) {}
+        PostMessageW(g->hwnd, WM_APP_IPC, 3, (LPARAM)rows);
+    }).detach();
 }
 
 void draftRecommend() {
@@ -842,7 +1050,7 @@ void draftPlan() {
     pi.champion = champ;
     pi.draft = draftContextFromUi();
     pi.role = pi.draft.role;
-    RunePlan rp = planRunes(g->dd, pi);
+    RunePlan rp = planRunes(*g->db, g->dd, pi);
     SpellPlan sp = planSpells(g->dd, pi);
     ItemPlan ip = planItems(*g->db, g->dd, pi);
     g->quiz = buildQuiz(g->dd, pi);
@@ -857,7 +1065,345 @@ void draftPlan() {
                                  json{{"champion", pi.champion}, {"role", pi.role}}, payload,
                                  ip.confidence, "plan manual desde Draft Lab");
     g->db->saveRecommendation("pregame_plan", contract.dump());
+    g->lastRunePage = rp.main;
+    g->lastPlanChampion = pi.champion;
+    g->lastPlanRole = pi.role;
     rvSet(ctl(IDC_DRAFT_VIEW), rvPlan(pi.champion, pi.role, rp, sp, ip, g->quiz));
+}
+
+// Writes the shown rune page to the client. RF-RUN-003: one human click, a
+// diff first, and never a personal page. Nothing here runs on its own.
+void applyRunesToClient() {
+    if (!Config::load().runeWriteEnabled) {
+        MessageBoxW(g->hwnd,
+                    L"Aplicar runas al cliente está desactivado.\n\n"
+                    L"Actívalo en Ajustes. Aunque lo actives, RiftLoop nunca aplica nada solo: "
+                    L"cada escritura necesita este botón.",
+                    L"RiftLoop", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (g->lastRunePage.perks.size() < 9) {
+        MessageBoxW(g->hwnd, L"Genera antes un plan pregame para tener una página que aplicar.",
+                    L"RiftLoop", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    Config cfg = Config::load();
+    Lcu lcu;
+    if (!lcu.connect(cfg.leagueLockfilePath)) {
+        MessageBoxW(g->hwnd, L"El cliente de League no está abierto.", L"RiftLoop",
+                    MB_OK | MB_ICONWARNING);
+        return;
+    }
+    std::string pageName = "RiftLoop: " + champDisplay(g->lastPlanChampion) +
+                           (g->lastPlanRole.empty() ? "" : " " + g->lastPlanRole);
+    auto pages = parsePerkPages(lcu.getRaw("/lol-perks/v1/pages"));
+    auto inv = parsePerkInventory(lcu.getRaw("/lol-perks/v1/inventory"));
+    PageWritePlan plan = planPageWrite(pages, inv, g->lastRunePage, pageName,
+                                       g->db->getKv("rune_write_signature"), g->dd);
+
+    if (plan.action == WriteAction::NoChange) {
+        setText(IDC_PROFILE_STATUS, "La página ya estaba aplicada; no se tocó nada.");
+        return;
+    }
+    bool force = false;
+    if (plan.action == WriteAction::Blocked) {
+        if (!plan.userEdited) {
+            MessageBoxW(g->hwnd, w(plan.blockedReason).c_str(), L"No se aplica",
+                        MB_OK | MB_ICONWARNING);
+            return;
+        }
+        if (MessageBoxW(g->hwnd,
+                        (w(plan.blockedReason) +
+                         L"\n\n¿Sobrescribo tu edición con la página de RiftLoop?").c_str(),
+                        L"Página editada a mano", MB_YESNO | MB_ICONQUESTION) != IDYES)
+            return;
+        force = true;
+    } else {
+        // Show the diff before touching anything (RF-RUN-003).
+        std::wstring text = (plan.action == WriteAction::Create
+                                 ? L"Se creará la página \"" + w(pageName) + L"\":\n\n"
+                                 : L"Se actualizará la página \"" + w(pageName) + L"\":\n\n");
+        for (auto& line : plan.diff) text += L"  " + w(line) + L"\n";
+        text += L"\nNo se toca ninguna otra página tuya. Podrás deshacerlo con un clic.";
+        if (MessageBoxW(g->hwnd, text.c_str(), L"Aplicar runas", MB_OKCANCEL | MB_ICONQUESTION) !=
+            IDOK)
+            return;
+    }
+    WriteResult r = applyRunePage(*g->db, lcu, g->dd, g->lastRunePage, pageName, force);
+    setText(IDC_PROFILE_STATUS, r.message);
+    MessageBoxW(g->hwnd, w(r.message).c_str(), L"RiftLoop",
+                MB_OK | (r.ok ? MB_ICONINFORMATION : MB_ICONWARNING));
+}
+
+void undoRunesInClient() {
+    if (!canUndoRunePage(*g->db)) {
+        MessageBoxW(g->hwnd, L"No hay ninguna escritura de runas que deshacer.", L"RiftLoop",
+                    MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    Lcu lcu;
+    if (!lcu.connect(Config::load().leagueLockfilePath)) {
+        MessageBoxW(g->hwnd, L"El cliente de League no está abierto.", L"RiftLoop",
+                    MB_OK | MB_ICONWARNING);
+        return;
+    }
+    WriteResult r = undoRunePage(*g->db, lcu);
+    setText(IDC_PROFILE_STATUS, r.message);
+    MessageBoxW(g->hwnd, w(r.message).c_str(), L"RiftLoop",
+                MB_OK | (r.ok ? MB_ICONINFORMATION : MB_ICONWARNING));
+}
+
+// Frees the thumbnails of the previous playlist. The report view draws them
+// but never owns them.
+void playClipRow(int row, bool autoplay = true);
+
+void releaseClipThumbs() {
+    for (HBITMAP b : g->clipThumbBitmaps) DeleteObject(b);
+    g->clipThumbBitmaps.clear();
+}
+
+// Places the "generate" button: centred in the panel while the playlist is
+// empty, tucked under the player once there are cards to play.
+void layoutClipPanel(bool hasClips) {
+    HWND btn = ctl(IDC_MAKE_CLIPS);
+    HWND list = ctl(IDC_CLIP_LIST);
+    if (!btn || !list) return;
+    RECT lr;
+    GetWindowRect(list, &lr);
+    POINT tl{lr.left, lr.top};
+    ScreenToClient(g->hwnd, &tl);
+    int panelW = lr.right - lr.left;
+    int panelH = lr.bottom - lr.top;
+    if (hasClips) {
+        // Out of the way: the list owns the panel.
+        SetWindowPos(btn, nullptr, tl.x + (panelW - 260) / 2, tl.y + panelH + 10, 260, 32,
+                     SWP_NOZORDER);
+    } else {
+        // Nothing to play: the one action available sits in the middle.
+        SetWindowPos(btn, nullptr, tl.x + (panelW - 260) / 2, tl.y + panelH / 2 - 16, 260, 34,
+                     SWP_NOZORDER);
+    }
+}
+
+// Fills the playlist with the clips of the shown analysis: one card per
+// evidence that has a clip on disk, with a still from the moment itself.
+void refreshClipList() {
+    HWND lv = ctl(IDC_CLIP_LIST);
+    if (!lv) return;
+    releaseClipThumbs();
+    g->clipRowFiles.clear();
+    std::vector<RVItem> items;
+    auto dir = util::dataDir() / "clips";
+
+    if (!g->currentMatchId.empty()) {
+        if (auto a = g->db->loadAnalysis(g->currentMatchId)) {
+            std::set<std::string> seen;      // one card per clip, never a repeat
+            for (auto& f : a->findings) {
+                for (auto& ev : f.evidence) {
+                    if (ev.clipFile.empty() || !seen.insert(ev.clipFile).second) continue;
+                    auto path = dir / ev.clipFile;
+                    if (!std::filesystem::exists(path)) continue;
+                    RVItem card;
+                    card.kind = RVKind::ClipCard;
+                    // The detector id is jargon and steals room from the title.
+                    card.text = L"[" + w(util::formatGameClock(ev.gameTimestampMs)) + L"]  " +
+                                w(f.title);
+                    card.subtitle = w(ev.observedFacts);
+                    // The moment itself sits past the lead margin.
+                    card.thumb = grabFrame(path.wstring(), (double)kClipLeadMs / 1000.0, 96, 54);
+                    if (card.thumb) g->clipThumbBitmaps.push_back(card.thumb);
+                    card.action = "clip:" + ev.clipFile;
+                    card.selected = items.empty();
+                    items.push_back(std::move(card));
+                    g->clipRowFiles.push_back(ev.clipFile);
+                }
+            }
+        }
+    }
+
+    if (items.empty()) {
+        items.push_back({RVKind::Dim,
+                         L"Todavía no hay clips de esta partida.\n\nSi grabaste la partida, "
+                         L"RiftLoop puede cortar los momentos que sostienen el diagnóstico."});
+    }
+    rvSet(lv, std::move(items));
+    bool hasClips = !g->clipRowFiles.empty();
+    layoutClipPanel(hasClips);
+    // Nothing to play: hide the video surface and its bar instead of leaving a
+    // dead frame and a set of controls that do nothing.
+    if (g->playerWnd) {
+        ShowWindow(g->playerWnd, hasClips ? SW_SHOW : SW_HIDE);
+        showPlayerBar(g->playerWnd, hasClips && g->currentPage == 2);
+    }
+    if (hasClips) playClipRow(0, false);
+    else setText(IDC_CLIP_STATUS, "");
+}
+
+void playClipFile(const std::string& fileName) {
+    int row = -1;
+    for (size_t i = 0; i < g->clipRowFiles.size(); ++i)
+        if (g->clipRowFiles[i] == fileName) row = (int)i;
+    playClipRow(row);
+}
+
+void playClipRow(int row, bool autoplay) {
+    if (row < 0 || row >= (int)g->clipRowFiles.size()) return;
+    HWND host = g->playerWnd;
+    if (!host) return;
+    if (!g->player) {
+        g->player = std::make_unique<VideoPlayer>();
+        if (!g->player->attach(host)) {
+            g->player.reset();
+            setText(IDC_CLIP_STATUS, "No se pudo iniciar el reproductor.");
+            return;
+        }
+        bindPlayerHost(host, g->player.get());
+    }
+    auto path = util::dataDir() / "clips" / g->clipRowFiles[row];
+    if (!g->player->load(path.wstring())) {
+        setText(IDC_CLIP_STATUS, "No se pudo abrir el clip.");
+        return;
+    }
+    RECT rc;
+    GetClientRect(host, &rc);
+    g->player->resize(rc.right, rc.bottom);
+    if (autoplay) {
+        g->player->play();
+        setText(IDC_CLIP_STATUS, "Reproduciendo el momento.");
+    } else {
+        // Loaded and paused: the panel shows the first frame instead of black.
+        g->player->play();
+        g->player->pause();
+        setText(IDC_CLIP_STATUS, "Listo para reproducir.");
+    }
+}
+
+// Produces the evidence clips of the shown match. Cutting the recording takes
+// a couple of seconds and needs nothing open; falling back to the client replay
+// takes minutes and puts the game on screen, so it is offered, never assumed.
+void makeClipsForCurrentMatch() {
+    if (g->currentMatchId.empty()) return;
+    std::string matchId = g->currentMatchId;
+
+    if (hasRecordingFor(*g->db, matchId)) {
+        SetWindowTextW(ctl(IDC_MAKE_CLIPS), L"Generando...");
+        EnableWindow(ctl(IDC_MAKE_CLIPS), FALSE);
+        setText(IDC_CLIP_STATUS, "Buscando los momentos destacados...");
+        SendMessageW(ctl(IDC_CLIP_PROGRESS), PBM_SETRANGE32, 0, 100);
+        SendMessageW(ctl(IDC_CLIP_PROGRESS), PBM_SETPOS, 0, 0);
+        ShowWindow(ctl(IDC_CLIP_PROGRESS), SW_SHOW);
+        std::thread([matchId] {
+            Db db;
+            auto res = makeClipsFromRecording(db, matchId, [](ClipProgress p) {
+                {
+                    std::lock_guard lk(g->clipMutex);
+                    g->clipStatus = p.label;
+                    g->clipStep = p.step;
+                    g->clipTotal = p.total;
+                }
+                PostMessageW(g->hwnd, WM_APP_CLIPS, 1, 0);
+            });
+            {
+                std::lock_guard lk(g->clipMutex);
+                g->clipStatus = res.message;
+            }
+            PostMessageW(g->hwnd, WM_APP_CLIPS, 2, (LPARAM)res.made);
+        }).detach();
+        return;
+    }
+
+    // Clips already made and the recording already reduced: say so instead of
+    // offering to redo the work from the client replay.
+    if (!g->clipRowFiles.empty()) {
+        MessageBoxW(g->hwnd,
+                    L"Esta partida ya tiene sus clips y la grabación completa se borró al "
+                    L"generarlos.\n\nSelecciona un clip en la lista para verlo.",
+                    L"RiftLoop", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    // No recording: the only other source is the client replay.
+    if (!Config::load().clipsEnabled) {
+        MessageBoxW(g->hwnd,
+                    L"No hay grabación de esa partida.\n\n"
+                    L"RiftLoop puede abrir el replay en el cliente y grabar los momentos, "
+                    L"pero eso está desactivado. Actívalo en Ajustes.",
+                    L"RiftLoop", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (MessageBoxW(g->hwnd,
+                    L"No hay grabación de esa partida.\n\n"
+                    L"Se puede abrir el replay en el cliente y grabar los momentos, pero "
+                    L"tarda unos minutos y ocupa la pantalla. ¿Continuar?",
+                    L"Generar clips", MB_YESNO | MB_ICONQUESTION) != IDYES)
+        return;
+    std::wstring exe = exeDirW() + L"\\RiftLoop.Analyzer.exe";
+    std::wstring args = L"--clips " + w(matchId);
+    ShellExecuteW(g->hwnd, L"open", exe.c_str(), args.c_str(), nullptr, SW_SHOWNORMAL);
+    setText(IDC_CLIP_STATUS, "Abriendo el replay en el cliente...");
+}
+
+void openRecordingsFolder() {
+    auto dir = util::dataDir() / "clips";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    ShellExecuteW(g->hwnd, L"open", dir.wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+// Deletes the oldest full recordings until the folder is under the quota.
+// Evidence clips are never touched, and nothing goes without confirmation:
+// this is the user's own video (PRD 16.3).
+void pruneRecordings() {
+    RecordingsInfo info = recordingsInfo();
+    if (info.bytes <= kRecordingQuotaBytes) {
+        MessageBoxW(g->hwnd, L"Las grabaciones ya están por debajo del límite.", L"RiftLoop",
+                    MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    std::error_code ec;
+    auto dir = util::dataDir() / "clips";
+    std::vector<std::pair<std::filesystem::file_time_type, std::filesystem::path>> files;
+    for (auto& e : std::filesystem::directory_iterator(dir, ec)) {
+        if (!e.is_regular_file(ec)) continue;
+        if (!isFullRecording(e.path().filename().string())) continue;
+        files.push_back({e.last_write_time(ec), e.path()});
+    }
+    std::sort(files.begin(), files.end(), [](auto& a, auto& b) { return a.first < b.first; });
+
+    int64_t total = info.bytes;
+    std::vector<std::filesystem::path> doomed;
+    for (auto& [when, path] : files) {
+        if (total <= kRecordingQuotaBytes) break;
+        total -= (int64_t)std::filesystem::file_size(path, ec);
+        doomed.push_back(path);
+    }
+    if (doomed.empty()) return;
+
+    std::wstring msg = L"Se borrarán " + std::to_wstring(doomed.size()) +
+                       L" grabaciones completas, las más antiguas:\n\n";
+    for (auto& p2 : doomed) msg += L"  " + p2.filename().wstring() + L"\n";
+    msg += L"\nQuedarán " + humanSize(total) + L". Los clips de evidencia no se tocan.\n"
+           L"Esto no se puede deshacer. ¿Continuar?";
+    if (MessageBoxW(g->hwnd, msg.c_str(), L"Liberar espacio", MB_YESNO | MB_ICONWARNING) != IDYES)
+        return;
+
+    int removed = 0;
+    for (auto& p2 : doomed)
+        if (std::filesystem::remove(p2, ec)) ++removed;
+    g->db->audit("recordings_pruned",
+                 json{{"removed", removed}, {"bytes_left", total}}.dump());
+    setText(IDC_PROFILE_STATUS, std::to_string(removed) + " grabaciones borradas.");
+    refreshSettings();
+}
+
+void openClip(const std::string& fileName) {
+    auto path = util::dataDir() / "clips" / fileName;
+    if (!std::filesystem::exists(path)) {
+        MessageBoxW(g->hwnd, L"El clip ya no está en disco.", L"RiftLoop",
+                    MB_OK | MB_ICONWARNING);
+        return;
+    }
+    ShellExecuteW(g->hwnd, L"open", path.wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
 void giveFeedback(const char* label) {
@@ -1126,17 +1672,23 @@ void processIpcQueue() {
                     // Hook safety: open/close the quiz by state too.
                     if (s == "Loading") openQuizWindow();
                     if (s == "InGame" && g->quizWnd) DestroyWindow(g->quizWnd);
+                    if (s != "ChampSelect") clearDraftView();
                 }
             } else if (type == "top3") {
+                if (j.contains("draft")) applyDraftView(j.at("draft"));
                 Top3 top = j.at("data").at("options").get<Top3>();
                 rvSet(ctl(IDC_DRAFT_VIEW), rvTop3(top));
                 if (g->currentPage != 4) switchPage(4);      // live champ select focus
             } else if (type == "plan") {
+                if (j.contains("draft")) applyDraftView(j.at("draft"));
                 const json& d = j.at("data").at("options");
                 RunePlan rp = d.at("runes").get<RunePlan>();
                 SpellPlan sp = d.at("spells").get<SpellPlan>();
                 ItemPlan ip = d.at("items").get<ItemPlan>();
                 g->quiz = j.value("quiz", std::vector<QuizQuestion>{});
+                g->lastRunePage = rp.main;
+                g->lastPlanChampion = d.value("champion", "");
+                g->lastPlanRole = d.value("role", "");
                 rvSet(ctl(IDC_DRAFT_VIEW),
                       rvPlan(d.value("champion", ""), d.value("role", ""), rp, sp, ip, g->quiz));
             } else if (type == "quiz_show") {
@@ -1235,14 +1787,45 @@ void buildPages() {
     mkButton(1, L"Refrescar", X + 360, Y + 492, 120, 30, IDC_MATCH_REFRESH);
 
     // ---- 2: Post-match -----------------------------------------------------
-    mkReport(2, X, Y, W, 440, IDC_POST_VIEW);
-    mk(2, L"STATIC", L"¿El diagnóstico principal es correcto?", WS_VISIBLE, X, Y + 452, 260, 24,
-       0);
-    mkButton(2, L"Correcto", X + 270, Y + 448, 96, 28, IDC_FB_OK);
-    mkButton(2, L"Parcial", X + 372, Y + 448, 96, 28, IDC_FB_PARTIAL);
-    mkButton(2, L"Incorrecto", X + 474, Y + 448, 96, 28, IDC_FB_WRONG);
-    mkButton(2, L"Falta contexto", X + 576, Y + 448, 120, 28, IDC_FB_CTX);
-    mkButton(2, L"Aceptar misión sugerida", X, Y + 488, 210, 32, IDC_ACCEPT_MISSION);
+    // Two columns: the diagnosis on the left, the clips that back it up on the
+    // right. They never overlap, so the player can sit next to the text.
+    const int postW = W - kClipPanelW - 24;      // left column
+    const int clipX = X + W - kClipPanelW;       // right column origin
+    // Lay out against the real client area: kWinH counts the title bar and the
+    // borders, so using it pushed the last control off the bottom edge.
+    RECT clientRc{};
+    GetClientRect(g->hwnd, &clientRc);
+    const int clientH = clientRc.bottom > 200 ? clientRc.bottom : kWinH - 40;
+    const int postH = clientH - Y - 108;
+    mkReport(2, X, Y, postW, postH, IDC_POST_VIEW);
+    mk(2, L"STATIC", L"¿El diagnóstico principal es correcto?", WS_VISIBLE, X, Y + postH + 14,
+       260, 24, 0);
+    mkButton(2, L"Correcto", X + 270, Y + postH + 10, 96, 28, IDC_FB_OK);
+    mkButton(2, L"Parcial", X + 372, Y + postH + 10, 96, 28, IDC_FB_PARTIAL);
+    mkButton(2, L"Incorrecto", X + 474, Y + postH + 10, 96, 28, IDC_FB_WRONG);
+    mkButton(2, L"Falta contexto", X + 576, Y + postH + 10, 120, 28, IDC_FB_CTX);
+    mkButton(2, L"Aceptar misión sugerida", X, Y + postH + 50, 210, 32, IDC_ACCEPT_MISSION);
+
+    // Right column.
+    mk(2, L"STATIC", L"Clips de la partida", WS_VISIBLE, clipX, Y, kClipPanelW, 22, 0);
+    HWND pv = CreateWindowW(L"RiftLoopPlayer", L"", WS_CHILD | WS_VISIBLE, clipX, Y + 28,
+                            kClipPanelW, kClipPanelW * 9 / 16, g->hwnd,
+                            (HMENU)(INT_PTR)IDC_CLIP_PLAYER, nullptr, nullptr);
+    g->pageControls[2].push_back(pv);
+    g->playerWnd = pv;
+    const int playerBottom = Y + 28 + kClipPanelW * 9 / 16;
+    // The player draws its own control bar just under the video (play, stop,
+    // seek, full screen), so the panel only carries status.
+    const int barBottom = playerBottom + 44;
+    mk(2, L"STATIC", L"", WS_VISIBLE, clipX, barBottom + 8, kClipPanelW, 20, IDC_CLIP_STATUS);
+    mk(2, PROGRESS_CLASSW, L"", 0, clipX, barBottom + 30, kClipPanelW, 4, IDC_CLIP_PROGRESS);
+    const int listTop = barBottom + 44;
+    const int listH = clientH - listTop - 52;    // room for the button below
+    mkReport(2, clipX, listTop, kClipPanelW, listH, IDC_CLIP_LIST);
+    // Centred in the panel while there is nothing to play; tucked under the
+    // list once the playlist has cards (see layoutClipPanel).
+    mkButton(2, L"Generar clips de evidencia", clipX + 60, listTop + listH + 10, 260, 32,
+             IDC_MAKE_CLIPS);
 
     // ---- 3: Misión ---------------------------------------------------------
     mkReport(3, X, Y, 520, 440, IDC_MISSION_VIEW);
@@ -1274,7 +1857,10 @@ void buildPages() {
         mk(4, L"COMBOBOX", L"", WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, X + 70 + i * 168,
            Y + 86, 160, 380, IDC_DRAFT_ENEMY0 + i);
 
-    mkReport(4, X, Y + 126, W, 400, IDC_DRAFT_VIEW);
+    mk(4, L"STATIC", L"Baneos: -", WS_VISIBLE, X, Y + 122, 600, 22, IDC_DRAFT_BANS);
+    mkButton(4, L"Aplicar runas", X + 616, Y + 116, 150, 28, IDC_APPLY_RUNES);
+    mkButton(4, L"Deshacer", X + 776, Y + 116, 110, 28, IDC_UNDO_RUNES);
+    mkReport(4, X, Y + 150, W, 376, IDC_DRAFT_VIEW);
     rvSet(ctl(IDC_DRAFT_VIEW),
           {{RVKind::Title, L"Draft Lab"},
            {RVKind::Text, L"En champion select esta página se rellena sola desde el Agent."},
@@ -1292,13 +1878,22 @@ void buildPages() {
        26, IDC_SET_LCU);
     mk(6, L"BUTTON", L"Grabación local (beta)", WS_VISIBLE | BS_AUTOCHECKBOX, X + 500, Y, 240, 26,
        IDC_SET_CAPTURE);
+    mk(6, L"BUTTON", L"Clips de evidencia desde el replay", WS_VISIBLE | BS_AUTOCHECKBOX, X,
+       Y + 108, 340, 26, IDC_SET_CLIPS);
+    mk(6, L"BUTTON", L"Aplicar runas al cliente (siempre con un clic tuyo)",
+       WS_VISIBLE | BS_AUTOCHECKBOX, X + 360, Y + 108, 420, 26, IDC_SET_RUNEWRITE);
+    mk(6, L"BUTTON", L"Conservar la partida completa además de los clips",
+       WS_VISIBLE | BS_AUTOCHECKBOX, X, Y + 178, 420, 26, IDC_SET_KEEPFULL);
     mk(6, L"STATIC", L"Ruta del lockfile (vacío = autodetectar)", WS_VISIBLE, X, Y + 40, 280, 22,
        0);
     mk(6, L"EDIT", L"", WS_VISIBLE | WS_BORDER, X + 290, Y + 38, 380, 26, IDC_SET_LOCKFILE);
+    mkButton(6, L"Abrir grabaciones", X, Y + 142, 170, 30, IDC_OPEN_CLIPS);
+    mkButton(6, L"Liberar espacio", X + 180, Y + 142, 160, 30, IDC_PRUNE_CLIPS);
     mkButton(6, L"Guardar ajustes", X, Y + 78, 150, 30, IDC_SET_SAVE);
     mkButton(6, L"Log de auditoría", X + 160, Y + 78, 150, 30, IDC_SET_AUDIT);
-    mkButton(6, L"Borrar TODOS los datos", X + 320, Y + 78, 200, 30, IDC_SET_WIPE);
-    mkReport(6, X, Y + 124, W, 400, IDC_SET_VIEW);
+    mkButton(6, L"Actualizar muestra", X + 320, Y + 78, 180, 30, IDC_SET_META);
+    mkButton(6, L"Borrar TODOS los datos", X + 510, Y + 78, 200, 30, IDC_SET_WIPE);
+    mkReport(6, X, Y + 210, W, 314, IDC_SET_VIEW);
 }
 
 void switchPage(int page) {
@@ -1306,9 +1901,22 @@ void switchPage(int page) {
     for (int p = 0; p < kPages; ++p)
         for (HWND h : g->pageControls[p])
             ShowWindow(h, p == page ? SW_SHOW : SW_HIDE);
+    // The control bar is a sibling of the video, not a page control, so it has
+    // to be hidden by hand or it floats over every other page.
+    if (g->playerWnd) showPlayerBar(g->playerWnd, page == 2 && !g->clipRowFiles.empty());
     switch (page) {
         case 0: refreshProfileUi(); break;
         case 1: refreshMatchList(); break;
+        case 2:
+            // Opening the page with nothing loaded showed an empty panel. Fall
+            // back to the most recent analysed match.
+            if (g->currentMatchId.empty()) {
+                for (auto& r : g->db->listMatches(10))
+                    if (r.analyzed) { showAnalysis(r.matchId); break; }
+            } else {
+                refreshClipList();
+            }
+            break;
         case 3: refreshMission(); break;
         case 5: rvSet(ctl(IDC_PATCH_VIEW), rvPatch()); break;
         case 6: refreshSettings(); break;
@@ -1335,6 +1943,10 @@ void paintChrome(HDC dc) {
                                        w(g->dd.locale())
                                  : L"sin datos estáticos";
     TextOutW(dc, 24, 54, patch.c_str(), (int)patch.size());
+    // Version and build stamp: without them there is no way to tell whether the
+    // running binary is the one just compiled.
+    std::wstring ver = L"v" + w(kAppVersion) + L" · " + w(appBuildStamp());
+    TextOutW(dc, 24, 70, ver.c_str(), (int)ver.size());
 
     // State footer.
     SelectObject(dc, theme::small_());
@@ -1498,6 +2110,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case IDC_FB_PARTIAL: giveFeedback("parcial"); break;
                 case IDC_FB_WRONG: giveFeedback("incorrecto"); break;
                 case IDC_FB_CTX: giveFeedback("falta_contexto"); break;
+                case IDC_MAKE_CLIPS: makeClipsForCurrentMatch(); break;
+                case IDC_CLIP_FULL:
+                    togglePlayerFullscreen(g->playerWnd);
+                    break;
+                case IDC_CLIP_PLAYPAUSE:
+                    if (g->player) {
+                        if (g->player->playing()) g->player->pause();
+                        else g->player->play();
+                    }
+                    break;
+                case IDC_APPLY_RUNES: applyRunesToClient(); break;
+                case IDC_UNDO_RUNES: undoRunesInClient(); break;
                 case IDC_ACCEPT_MISSION:
                 case IDC_ACCEPT_MISSION + 1: acceptSuggestedMission(); break;
                 case IDC_SUGGEST_MISSION: {
@@ -1512,6 +2136,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     break;
                 }
                 case IDC_MISSION_REFRESH: refreshMission(); break;
+                case IDC_SET_META: refreshMetaSample(); break;
+                case IDC_OPEN_CLIPS: openRecordingsFolder(); break;
+                case IDC_PRUNE_CLIPS: pruneRecordings(); break;
                 case IDC_DRAFT_GO: draftRecommend(); break;
                 case IDC_DRAFT_PLAN: draftPlan(); break;
                 case IDC_DRAFT_QUIZ: openQuizWindow(); break;
@@ -1521,6 +2148,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     cfg.overlayEnabled = IsDlgButtonChecked(hwnd, IDC_SET_OVERLAY) == BST_CHECKED;
                     cfg.lcuReadEnabled = IsDlgButtonChecked(hwnd, IDC_SET_LCU) == BST_CHECKED;
                     cfg.captureEnabled = IsDlgButtonChecked(hwnd, IDC_SET_CAPTURE) == BST_CHECKED;
+                    cfg.clipsEnabled = IsDlgButtonChecked(hwnd, IDC_SET_CLIPS) == BST_CHECKED;
+                    cfg.runeWriteEnabled =
+                        IsDlgButtonChecked(hwnd, IDC_SET_RUNEWRITE) == BST_CHECKED;
+                    cfg.keepFullRecording =
+                        IsDlgButtonChecked(hwnd, IDC_SET_KEEPFULL) == BST_CHECKED;
                     cfg.leagueLockfilePath = n(ctl(IDC_SET_LOCKFILE));
                     cfg.save();
                     refreshSettings();
@@ -1547,6 +2179,44 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
+        case WM_APP_CLIPS: {
+            std::string status;
+            int step = 0, total = 0;
+            {
+                std::lock_guard lk(g->clipMutex);
+                status = g->clipStatus;
+                step = g->clipStep;
+                total = g->clipTotal;
+            }
+            setText(IDC_CLIP_STATUS, status);
+            if (wp == 1 && total > 0)
+                SendMessageW(ctl(IDC_CLIP_PROGRESS), PBM_SETPOS, (WPARAM)(step * 100 / total), 0);
+            if (wp == 2) {
+                SendMessageW(ctl(IDC_CLIP_PROGRESS), PBM_SETPOS, 100, 0);
+                SetWindowTextW(ctl(IDC_MAKE_CLIPS), L"Generar clips de evidencia");
+                EnableWindow(ctl(IDC_MAKE_CLIPS), TRUE);
+                if ((int)lp > 0) {
+                    showAnalysis(g->currentMatchId);   // reload with the clip links
+                    refreshClipList();
+                    refreshSettings();
+                }
+            }
+            return 0;
+        }
+        case WM_RV_ACTION: {
+            std::string action = rvActionAt((HWND)lp, (int)wp);
+            if (action.rfind("clip:", 0) != 0) return 0;
+            std::string file = action.substr(5);
+            // A card in the playlist plays inline; the link inside the
+            // diagnosis text does the same, so the video always shows up next
+            // to the sentence it backs up.
+            playClipFile(file);
+            // Highlight the card being played, wherever the click came from.
+            HWND list = ctl(IDC_CLIP_LIST);
+            for (size_t i = 0; i < g->clipRowFiles.size(); ++i)
+                if (g->clipRowFiles[i] == file) rvHighlight(list, (int)i);
+            return 0;
+        }
         case WM_APP_IPC:
             if (wp == 1) {
                 EnableWindow(ctl(IDC_ANALYZE), TRUE);
@@ -1555,6 +2225,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 refreshMission();
                 auto rows = g->db->listMatches(1);
                 if ((int)lp > 0 && !rows.empty()) showAnalysis(rows[0].matchId);
+            } else if (wp == 3) {
+                EnableWindow(ctl(IDC_SET_META), TRUE);
+                setText(IDC_SET_META, "Actualizar muestra");
+                int rows = (int)lp;
+                setText(IDC_PROFILE_STATUS, rows < 0
+                    ? "No se pudo actualizar la muestra local."
+                    : "Muestra local: " + std::to_string(rows) + " builds.");
+                refreshSettings();
             } else if (wp == 2) {
                 EnableWindow(ctl(IDC_FETCH_API), TRUE);
                 EnableWindow(ctl(IDC_MATCH_FETCH), TRUE);
@@ -1625,6 +2303,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     }
 
     registerReportView(hInst);
+    registerPlayerView(hInst);
     WNDCLASSW wc{};
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInst;

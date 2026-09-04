@@ -216,6 +216,7 @@ int itemHeight(const RVItem& it) {
         case RVKind::IconRow: return 32;
         case RVKind::Badge:   return 30;
         case RVKind::Spacer:  return 12;
+        case RVKind::ClipCard: return 84;
     }
     return 22;
 }
@@ -317,6 +318,51 @@ void rvPaint(HWND hwnd, RVData* d) {
                     }
                     break;
                 }
+                case RVKind::ClipCard: {
+                    // Card: thumbnail, title, subtitle. Spaced so a playlist
+                    // reads as a list of moments, not as a dense table.
+                    RECT card{x, y, W - 16, y + h - 10};
+                    HBRUSH bg = CreateSolidBrush(it.selected ? theme::kCardHi : theme::kBg);
+                    FillRect(dc, &card, bg);
+                    DeleteObject(bg);
+                    if (it.selected) {
+                        RECT edge{card.left, card.top, card.left + 3, card.bottom};
+                        HBRUSH acc = CreateSolidBrush(theme::kAccent);
+                        FillRect(dc, &edge, acc);
+                        DeleteObject(acc);
+                    }
+                    int tw = 96, th = 54;
+                    if (it.thumb) {
+                        HDC mem = CreateCompatibleDC(dc);
+                        HGDIOBJ oldB = SelectObject(mem, it.thumb);
+                        BITMAP bm{};
+                        GetObject(it.thumb, sizeof bm, &bm);
+                        SetStretchBltMode(dc, HALFTONE);
+                        StretchBlt(dc, card.left + 10, card.top + 6, tw, th, mem, 0, 0, bm.bmWidth,
+                                   bm.bmHeight, SRCCOPY);
+                        SelectObject(mem, oldB);
+                        DeleteDC(mem);
+                    } else {
+                        RECT ph{card.left + 10, card.top + 6, card.left + 10 + tw,
+                                card.top + 6 + th};
+                        HBRUSH b2 = CreateSolidBrush(theme::kCard);
+                        FillRect(dc, &ph, b2);
+                        DeleteObject(b2);
+                    }
+                    int textX = card.left + 10 + tw + 12;
+                    SelectObject(dc, theme::body());
+                    SetTextColor(dc, theme::kText);
+                    RECT tr{textX, card.top + 8, card.right - 10, card.top + 34};
+                    DrawTextW(dc, it.text.c_str(), -1, &tr, DT_LEFT | DT_END_ELLIPSIS | DT_SINGLELINE);
+                    SelectObject(dc, theme::small_());
+                    SetTextColor(dc, theme::kDim);
+                    // Two lines at most, with an ellipsis: a card that spills
+                    // its text over the next one reads as broken.
+                    RECT sr{textX, card.top + 32, card.right - 10, card.bottom - 6};
+                    DrawTextW(dc, it.subtitle.c_str(), -1, &sr,
+                              DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS | DT_EDITCONTROL);
+                    break;
+                }
                 case RVKind::Badge: {
                     SelectObject(dc, theme::small_());
                     SIZE sz;
@@ -354,6 +400,25 @@ void rvUpdateScrollbar(HWND hwnd, RVData* d) {
     si.nPage = rc.bottom;
     si.nPos = d->scroll;
     SetScrollInfo(hwnd, SB_VERT, &si, TRUE);
+}
+
+// Item under a client-area point, or -1. Uses the same walk as the painter so
+// the hit area always matches what the user sees.
+int rvHitTest(HWND hwnd, RVData* d, int py) {
+    HDC dc = GetDC(hwnd);
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    HGDIOBJ oldFont = GetCurrentObject(dc, OBJ_FONT);
+    int y = 14 - d->scroll;
+    int hit = -1;
+    for (size_t i = 0; i < d->items.size(); ++i) {
+        int h = measureItem(dc, d->items[i], rc.right);
+        if (py >= y && py < y + h) { hit = (int)i; break; }
+        y += h;
+    }
+    SelectObject(dc, oldFont);
+    ReleaseDC(hwnd, dc);
+    return hit;
 }
 
 LRESULT CALLBACK ReportProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -402,6 +467,29 @@ LRESULT CALLBACK ReportProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
+        case WM_LBUTTONUP:
+            if (d) {
+                int idx = rvHitTest(hwnd, d, GET_Y_LPARAM(lp));
+                if (idx >= 0 && !d->items[idx].action.empty())
+                    PostMessageW(GetParent(hwnd), WM_RV_ACTION, (WPARAM)idx, (LPARAM)hwnd);
+            }
+            return 0;
+        case WM_SETCURSOR: {
+            // Hand cursor over a clickable row: the only affordance a flat
+            // report view can give.
+            POINT pt;
+            GetCursorPos(&pt);
+            ScreenToClient(hwnd, &pt);
+            if (d) {
+                int idx = rvHitTest(hwnd, d, pt.y);
+                if (idx >= 0 && !d->items[idx].action.empty()) {
+                    SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                    return TRUE;
+                }
+            }
+            SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+            return TRUE;
+        }
         case WM_ERASEBKGND:
             return 1;
         case WM_DESTROY:
@@ -431,6 +519,21 @@ void rvSet(HWND view, std::vector<RVItem> items) {
     d->items = std::move(items);
     d->scroll = 0;
     InvalidateRect(view, nullptr, FALSE);
+}
+
+void rvHighlight(HWND view, int index) {
+    if (!view) return;
+    auto* d = (RVData*)GetWindowLongPtrW(view, GWLP_USERDATA);
+    if (!d) return;
+    for (size_t i = 0; i < d->items.size(); ++i) d->items[i].selected = ((int)i == index);
+    InvalidateRect(view, nullptr, FALSE);
+}
+
+std::string rvActionAt(HWND view, int index) {
+    if (!view) return {};
+    auto* d = (RVData*)GetWindowLongPtrW(view, GWLP_USERDATA);
+    if (!d || index < 0 || index >= (int)d->items.size()) return {};
+    return d->items[index].action;
 }
 
 } // namespace rlui
