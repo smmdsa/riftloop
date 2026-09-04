@@ -8,7 +8,10 @@
 // Known beta limits (documented, RF-REC-004): no clip cutting yet, no
 // resolution downscale (records at window size), no in-game audio.
 #include "core/config.h"
+#include "core/lcu.h"
 #include "core/util.h"
+
+#include <nlohmann/json.hpp>
 
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
@@ -27,6 +30,7 @@
 #include <atomic>
 #include <cstdio>
 #include <string>
+#include <ctime>
 
 #pragma comment(lib, "windowsapp")
 #pragma comment(lib, "d3d11")
@@ -87,12 +91,39 @@ HWND findWindowByTitleSubstring(const std::wstring& needle) {
 bool initSinkWriter() {
     std::wstring dir = (rl::util::dataDir() / "clips").wstring();
     CreateDirectoryW(dir.c_str(), nullptr);
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    wchar_t name[64];
-    swprintf_s(name, L"%04d%02d%02d_%02d%02d%02d.mp4", st.wYear, st.wMonth, st.wDay, st.wHour,
-               st.wMinute, st.wSecond);
-    g->outPath = dir + L"\\" + name;
+    if (g->outPath.empty()) {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        wchar_t name[64];
+        swprintf_s(name, L"%04d%02d%02d_%02d%02d%02d.mp4", st.wYear, st.wMonth, st.wDay, st.wHour,
+                   st.wMinute, st.wSecond);
+        g->outPath = dir + L"\\" + name;
+    }
+
+    // Sidecar with the alignment data. Without the game clock at the moment
+    // recording started, a cut cannot land on the right second (RF-REC-003).
+    {
+        double gameTime = rl::liveGameTimeSec();
+        // Origin of the match clock inside the API clock. The Riot timeline
+        // counts from 0:00, the API from when the process started; the gap is
+        // the loading screen plus the fountain wait, over two minutes.
+        double startOffset = rl::liveGameStartOffsetSec();
+        nlohmann::json meta;
+        meta["start_game_time_sec"] = gameTime;
+        meta["game_start_offset_sec"] = startOffset;
+        meta["started_at_ms"] = (int64_t)_time64(nullptr) * 1000;
+        meta["fps"] = kFps;
+        std::wstring sidecar = g->outPath + L".json";
+        FILE* f = nullptr;
+        if (_wfopen_s(&f, sidecar.c_str(), L"wb") == 0 && f) {
+            std::string text = meta.dump(2);
+            fwrite(text.data(), 1, text.size(), f);
+            fclose(f);
+        }
+        if (gameTime < 0)
+            std::printf("aviso: sin reloj de partida; los cortes automaticos no podran "
+                        "alinearse\n");
+    }
 
     com_ptr<IMFAttributes> attrs;
     MFCreateAttributes(attrs.put(), 2);
@@ -178,17 +209,35 @@ void writeFrame(ID3D11Texture2D* frameTex, int64_t timestamp100ns) {
 
 } // namespace
 
+// An MP4 without its index is unreadable, so a recording that dies without
+// finalizing is lost footage. This catches console close, logoff and shutdown
+// and gives the writer a chance to close the file (RF-REC-004: degrade, never
+// lose what was already recorded).
+BOOL WINAPI onConsoleSignal(DWORD) {
+    if (g) {
+        g->running = false;
+        // The main loop finalizes; give it a moment before the OS kills us.
+        for (int i = 0; i < 40 && g->writer; ++i) Sleep(50);
+    }
+    return TRUE;
+}
+
 int wmain(int argc, wchar_t** argv) {
     SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCtrlHandler(onConsoleSignal, TRUE);
     // Recording must never starve the game (PRD 15.3).
     SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
 
     std::wstring windowTitle = L"League of Legends (TM) Client";   // the game window
     int seconds = 0;                 // 0 = until the window closes
+    std::wstring outPath;            // empty = timestamped name
     for (int i = 1; i < argc; ++i) {
         std::wstring a = argv[i];
         if (a == L"--window" && i + 1 < argc) windowTitle = argv[++i];
         if (a == L"--seconds" && i + 1 < argc) seconds = _wtoi(argv[++i]);
+        // --out names the file. Evidence clips need a stable name to link them
+        // back to the finding that produced them.
+        if (a == L"--out" && i + 1 < argc) outPath = argv[++i];
     }
 
     init_apartment(apartment_type::multi_threaded);
@@ -203,6 +252,7 @@ int wmain(int argc, wchar_t** argv) {
 
     CaptureApp app;
     g = &app;
+    app.outPath = outPath;
 
     app.target = findWindowByTitleSubstring(windowTitle);
     if (!app.target) {
@@ -275,7 +325,10 @@ int wmain(int argc, wchar_t** argv) {
 
     app.session.Close();
     app.pool.Close();
-    if (app.writer) app.writer->Finalize();
+    if (app.writer) {
+        app.writer->Finalize();
+        app.writer = nullptr;        // tells the signal handler the file is closed
+    }
     MFShutdown();
     std::printf("grabacion finalizada: %s\n", rl::util::narrow(app.outPath).c_str());
     return 0;
