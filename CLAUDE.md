@@ -50,6 +50,35 @@ muestra con la numeración del cliente vía `Ddragon::displayPatch` (ddragon 16.
 `--frame` vuelca un fotograma a PNG: es la forma de comprobar que un clip cae donde dice
 (el reloj del juego se lee en la esquina superior derecha).
 
+### Actualizar el harness
+
+El paquete `harness/` esta vendorizado: son archivos normales, no un submodulo. Un
+submodulo no serviria, porque git no monta subdirectorios y habria que traer el repo
+entero, que ademas no se clona en Windows sin `core.longpaths=true`.
+
+El remoto vive en `.git/config` y no viaja con los commits. En una maquina nueva:
+
+```bash
+git remote add harness-upstream https://github.com/smmdsa/claudia-rag-pipeline.git
+git remote set-url --push harness-upstream DISABLED-no-push   # el push falla en seco
+```
+
+Para actualizar:
+
+```bash
+git fetch harness-upstream main
+git log --oneline HEAD..harness-upstream/main -- harness/     # que cambio en el paquete
+git checkout harness-upstream/main -- harness/                # solo el paquete
+python -m harness upgrade                                     # resiembra las plantillas
+python -m harness doctor                                      # exit 0
+```
+
+`upgrade` respeta lo que el proyecto posee: el manifiesto distingue los archivos `owned`
+de los `seeded`, y `.claude/settings.json` esta adoptado con `harness adopt`, asi que los
+parches de Windows (el shim de `tools/bin/python3` y `taskkill` fuera del deny)
+sobreviven. **Comprobalo igualmente la primera vez**: si `doctor` sale sano pero el hook
+deja de arrancar, mira si el comando perdio el prefijo del PATH.
+
 RiftLoop es un compañero nativo de mejora para League of Legends en Windows 10/11 x64.
 El PRD [RiftLoop_PRD_v1.0.md](RiftLoop_PRD_v1.0.md) es la fuente de verdad. Antes de
 implementar una función, lee su sección `RF-*`.
