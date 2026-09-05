@@ -1,0 +1,6 @@
+#!/bin/sh
+# Windows shim. `python3` on this machine is the Microsoft Store stub: it opens
+# the Store instead of running Python, so the harness hooks die in silence.
+# The hook command puts this directory first on PATH and keeps calling
+# `python3`, which is the exact string `harness doctor` looks for.
+exec python "$@"

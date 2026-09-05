@@ -1,0 +1,188 @@
+{
+  "$comment": "The harness writes this file. Do not edit it by hand. `doctor` reads it.",
+  "harness_version": "0.1.0",
+  "created_at": "2026-09-05T00:06:28-03:00",
+  "rules_path": ".claude/rules/harness.md",
+  "profile": {
+    "architecture": "Seis procesos Win32 nativos (Agent, Desktop, Overlay, Capture, Analyzer, Update) sobre una libreria core C++20 compartida, SQLite local, IPC por named pipes, sin servidor ni cuenta",
+    "languages": [
+      "c++",
+      "cmake"
+    ],
+    "purpose": "Convierte las partidas propias de League of Legends en una unica mision de mejora medible, con la evidencia en video que la sostiene",
+    "end_user": "Un jugador de League que quiere mejorar sin estudiar horas de contenido generico; si el producto falla pierde el diagnostico y los clips que lo respaldan, y en el peor caso ve caer los FPS de su partida"
+  },
+  "files": {
+    ".claude/agents/researcher.md": {
+      "kind": "owned",
+      "template": ".claude/agents/researcher.md",
+      "sha256": "1cf75ee7b2af34ff130aad2c9e982aa28b35c4ed169b3122207ea1ec6c9173f4"
+    },
+    ".claude/settings.json": {
+      "kind": "seeded",
+      "template": ".claude/settings.json",
+      "sha256": "5d6b02d0772f87d3311988ebe40aa09d96384e1e50c6e95db99a41990baa0dd7",
+      "adopted": true
+    },
+    ".claude/skills/architecture-reader/SKILL.md": {
+      "kind": "owned",
+      "template": ".claude/skills/architecture-reader/SKILL.md",
+      "sha256": "7894483c36ac0b7d9f580ba8132e8aac640536cc3f733dbb613c74ed33e8d189"
+    },
+    ".claude/skills/board/SKILL.md": {
+      "kind": "owned",
+      "template": ".claude/skills/board/SKILL.md",
+      "sha256": "2309fae0988a4a861e41dd10437336f1ca4aad0a68d2d8a3dfee1e42422e1146"
+    },
+    ".claude/skills/ceremony/SKILL.md": {
+      "kind": "owned",
+      "template": ".claude/skills/ceremony/SKILL.md",
+      "sha256": "f3134fa7a5a380a65bc723f4925be64c6137000bc8e129c8bd4d0d734c06d1a9"
+    },
+    ".claude/skills/end-user-impact/SKILL.md": {
+      "kind": "owned",
+      "template": ".claude/skills/end-user-impact/SKILL.md",
+      "sha256": "68cdad268c4b408606056bd59aa5d6dcc2938a912871250ddf28edc89c9a2235"
+    },
+    ".claude/skills/research/SKILL.md": {
+      "kind": "owned",
+      "template": ".claude/skills/research/SKILL.md",
+      "sha256": "0f71bb21ff4c220dd470e207afb6e5db84f85cc2b7e680a8ba79da5e44236512"
+    },
+    ".claude/skills/session-close/SKILL.md": {
+      "kind": "owned",
+      "template": ".claude/skills/session-close/SKILL.md",
+      "sha256": "f389eb8cbf810777a37b14e2f5e42584c5e140e69eef7ea9e9b88ef72d8e7195"
+    },
+    ".claude/skills/session-start/SKILL.md": {
+      "kind": "owned",
+      "template": ".claude/skills/session-start/SKILL.md",
+      "sha256": "8dd7e571105e7639737e51244854b825d8c2427e5389c46e837d66744069c144"
+    },
+    ".claude/workflows/research.js": {
+      "kind": "owned",
+      "template": ".claude/workflows/research.js",
+      "sha256": "197d4a8281ea4d85472ada1381c111067c17715ce14582d12b375c35a1f4bae3"
+    },
+    ".harness/escalations.md": {
+      "kind": "seeded",
+      "template": ".harness/escalations.md"
+    },
+    ".harness/journal.jsonl": {
+      "kind": "seeded",
+      "template": ".harness/journal.jsonl"
+    },
+    ".harness/targets.json": {
+      "kind": "seeded",
+      "template": ".harness/targets.json"
+    },
+    ".mcp.json": {
+      "kind": "seeded",
+      "template": ".mcp.json"
+    },
+    ".claude/rules/harness.md": {
+      "kind": "owned",
+      "template": "CLAUDE.md",
+      "sha256": "1b5bdc9cc8eab03da14e552a73488a42daac54a00a54e804e7b4c53f88f39f43"
+    },
+    "docs/ACTIVITY.md": {
+      "kind": "seeded",
+      "template": "docs/ACTIVITY.md"
+    },
+    "docs/session-log.md": {
+      "kind": "seeded",
+      "template": "docs/session-log.md"
+    },
+    ".gitignore": {
+      "kind": "seeded",
+      "template": "gitignore.lines"
+    },
+    "infra/board/Dockerfile": {
+      "kind": "owned",
+      "template": "infra/board/Dockerfile",
+      "sha256": "ce003cc016dabc7081e0f9234e4eb60860f215c39cd203926002ecbd6c057d9c"
+    },
+    "infra/board/README.md": {
+      "kind": "owned",
+      "template": "infra/board/README.md",
+      "sha256": "5f1b8f87ba091b8bff4a2d21c10c86670fe22c06b77cf7ff62e85bb253049fd5"
+    },
+    "infra/board/docker-compose.yml": {
+      "kind": "owned",
+      "template": "infra/board/docker-compose.yml",
+      "sha256": "902f8e9fb5f1d07b86e54e13130c840cafe3176700c46f912be667d579706cf2"
+    },
+    "infra/rag/Dockerfile": {
+      "kind": "owned",
+      "template": "infra/rag/Dockerfile",
+      "sha256": "c122b51dfa9f10a582075c5fbe6fafef929469d988ffb6a75772d4d67fc6c031"
+    },
+    "infra/rag/README.md": {
+      "kind": "owned",
+      "template": "infra/rag/README.md",
+      "sha256": "acad491e8784e710d945cfbc28dc38f9ea477bde160b161a9163ad467daf5b6a"
+    },
+    "infra/rag/agent/agent.py": {
+      "kind": "owned",
+      "template": "infra/rag/agent/agent.py",
+      "sha256": "c1d2f0400ce6be920a5c3dc797ada4376cdf95f2e24cdd0727e16024c6478177"
+    },
+    "infra/rag/bun.lock": {
+      "kind": "owned",
+      "template": "infra/rag/bun.lock",
+      "sha256": "467342deac735c051dd3c602a3e4207d5389247ecdea958544c47ff53830222c"
+    },
+    "infra/rag/config/index.yml": {
+      "kind": "seeded",
+      "template": "infra/rag/config/index.yml"
+    },
+    "infra/rag/docker-compose.gpu.yml": {
+      "kind": "owned",
+      "template": "infra/rag/docker-compose.gpu.yml",
+      "sha256": "cb2e066164788722655f631cc5ed7c8699b9f24ec232dcd792053f1d7c417ab1"
+    },
+    "infra/rag/docker-compose.yml": {
+      "kind": "owned",
+      "template": "infra/rag/docker-compose.yml",
+      "sha256": "05df572e9254e90de2fc7e15dd446e352c5dd3c6927e4e6a71b7ce14138e8737"
+    },
+    "infra/rag/package.json": {
+      "kind": "owned",
+      "template": "infra/rag/package.json",
+      "sha256": "6b0573cac2121584c3083eb9a59dafced71f0b72a794e3a9de311655e9aab9e5"
+    },
+    "infra/rag/up.sh": {
+      "kind": "owned",
+      "template": "infra/rag/up.sh",
+      "sha256": "f27618040bf57e118473514fc87b1f1828a73c2198f7a1149d77bca67238743f"
+    },
+    "work/README.md": {
+      "kind": "owned",
+      "template": "work/README.md",
+      "sha256": "415c3a8f33c8bf007c5b88cef42d47e051cd5ae90582be74a757a58222081eee"
+    },
+    "work/ROADMAP.md": {
+      "kind": "seeded",
+      "template": "work/ROADMAP.md"
+    },
+    "work/backlog/README.md": {
+      "kind": "seeded",
+      "template": "work/backlog/README.md"
+    },
+    "work/templates/epic.md": {
+      "kind": "owned",
+      "template": "work/templates/epic.md",
+      "sha256": "46e5cf00aa9e6976edc2c9043ac5df2299ca6e9112d9697075ebb7e36e1f7b93"
+    },
+    "work/templates/sprint.md": {
+      "kind": "owned",
+      "template": "work/templates/sprint.md",
+      "sha256": "e4abb3c304e38224413516b11ddb5f9168dc1c7484bd1edbbccc370c79bab83b"
+    },
+    "work/templates/task.md": {
+      "kind": "owned",
+      "template": "work/templates/task.md",
+      "sha256": "7cdbb8f673e4563b789f333bccff8996a7e1baefc5aa01d3e8726d6ff8f6ec4e"
+    }
+  }
+}

@@ -4,4 +4,13 @@ out/
 *.user
 *.db
 *.log
-.claude/
+# Claude Code, machine-local only. The harness versions the rest of .claude/.
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+# harness: machine-local and cache files
+.harness/env.local
+.harness/board.sqlite
+.harness/board.sqlite.tmp
+__pycache__/
+*.pyc
+board.html
