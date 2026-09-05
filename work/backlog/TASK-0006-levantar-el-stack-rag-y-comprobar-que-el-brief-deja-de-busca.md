@@ -42,3 +42,27 @@ libres, asi que ese indice **no es el stack del harness**: hay un `qmd` accesibl
 via, con contenido que puede no ser de este repositorio. Antes de levantar nada, averiguar
 que responde y sobre que corpus. Indexar dos repositorios en el mismo indice explicaria
 los huerfanos.
+
+## Nota del 2026-09-05, sesion de la tarde: hecho, falta el ojo
+
+La sospecha era correcta. Los contenedores de 8410 a 8412 montaban
+`~/personal/harness-rag-pipeline`, el repositorio del propio harness dentro
+de WSL. Ni un solo archivo de este proyecto estaba indexado. Los huerfanos eran de aquel
+corpus, no de este.
+
+Lo hecho, con el detalle en `CLAUDE.md`:
+
+- Stack propio en WSL, en los puertos 8510, 8511 y 8512, para convivir con el otro
+  repositorio que usa los 8410 por defecto.
+- Sin build: las imagenes se etiquetaron desde las que ya existian, y los modelos de
+  embeddings se copiaron de un volumen a otro.
+- `rag config` anadio la coleccion `repo-code` que faltaba, con `third_party` y `build`
+  excluidos.
+
+Medido: `pitero-rag:cpu` 615 MB y `pitero-board:latest` 338 MB en imagenes; los volumenes
+suman 333,6 MB de modelos, 12,45 MB de indice y 36,9 kB de cache del board. El indice
+tiene 37 documentos de docs, 57 de codigo, 4 de memoria y **0 trozos huerfanos**. Los tres
+puertos responden 200 en `/health`.
+
+Queda el ojo del usuario. Y esta tarea sigue en el backlog porque no hay epica donde
+ponerla: EP-01 es el performance harness y no le corresponde.
