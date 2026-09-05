@@ -37,3 +37,29 @@ las descarta a proposito.
 
 Las grabaciones sin ese campo. Quedan descartadas por diseno; recuperarlas exigiria
 leer el reloj del propio video, que es otra tarea.
+
+## Medido el 2026-09-05: el paso 2 falla siempre, y es un bug de Capture
+
+Hay siete grabaciones completas en `%LOCALAPPDATA%\RiftLoop\clips`, 3,4 GB, hechas con el
+binario nuevo entre las 00:18 y las 03:48 UTC del 5 de septiembre. Las siete se alinean
+con su partida: `recordingsFor` las encuentra dentro de la ventana de 60 s, asi que
+`hasRecordingFor` dice que si y el boton toma el camino de nuestra grabacion, no el del
+replay del cliente.
+
+**Las siete traen `game_start_offset_sec: -1.0`.** Ninguna excepcion. Y `-1` es
+justamente lo que hace que `clipmaker.cpp:88` se niegue a cortar, que es lo correcto:
+sin el origen del reloj los clips caerian dos minutos antes de donde deben.
+
+La causa esta en `lcu.cpp:276`. `liveGameStartOffsetSec()` pide
+`/liveclientdata/eventdata` y busca el evento `GameStart`. Capture lo llama una sola vez,
+en `capture_main.cpp:110`, al escribir el sidecar, y eso pasa en el instante en que el
+Agent ve `GameState::InGame`. Las mismas siete grabaciones lo demuestran:
+`start_game_time_sec` vale entre 0,029 y 0,047 segundos. Capture arranca con el reloj de
+la API a cero, antes de que el evento `GameStart` exista, asi que la funcion devuelve -1
+y el sidecar se escribe ya invalido. Es una carrera, y siempre la pierde.
+
+El sidecar se escribe una vez y nunca se vuelve a tocar. Ese es el arreglo: escribirlo al
+empezar, como ahora, y actualizar `game_start_offset_sec` en cuanto el evento aparezca.
+
+Nota aparte: la negativa a cortar se muestra en la etiqueta de estado, no en un dialogo.
+Para el usuario el boton "no hace nada". El mensaje esta, pero no se ve.
