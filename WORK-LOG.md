@@ -69,6 +69,57 @@ vídeo, corte con Media Foundation y un refresco diario.
 
 ---
 
+## Sesión 15 — 2026-09-05 (instalar el harness claudia-rag-pipeline)
+
+Primera vez que el harness propio se instala en un repositorio que no es el suyo. El
+objetivo era ver si de verdad es agnóstico.
+
+**Qué es.** Un harness portátil: se copia el directorio `harness/` y `python -m harness
+init` deja un pipeline de agentes y un tablero SCRUM que viven en git, junto al código.
+Python 3.10+ y solo biblioteca estándar; el RAG opcional vive en dos contenedores.
+
+**La instalación salió bien.** 39 archivos, `doctor` sano. Respetó el `CLAUDE.md` que ya
+existía (sus reglas fueron a `.claude/rules/harness.md`) y añadió sus líneas al
+`.gitignore` sin tocar las demás. `uninstall` es reversible y conservador: solo borra lo
+que nadie ha editado.
+
+**No se dejó vacío.** `sprint-001` lleva el performance harness de PRD 15 con cinco tareas
+escritas de verdad (por qué, qué hacer, cuándo está hecho, qué no cubre), incluida la
+verificación pendiente del offset de relojes. `docs/ACTIVITY.md` recoge los seis frentes
+vivos. `session open` ya da un brief que sirve.
+
+### Tres defectos de portabilidad a Windows
+
+Son del harness, no de esta instalación, y valen como informe para su autor:
+
+1. **`git clone` del propio harness falla en Windows** sin `core.longpaths=true`: las
+   rutas de sus tareas pasan de 260 caracteres.
+2. **`python3` no existe en Windows.** Peor: es el stub de la Microsoft Store, que abre la
+   tienda en vez de ejecutar Python, así que los hooks morían en silencio.
+3. **`manifest.REQUIRED_HOOKS` compara la cadena literal `python3 -m harness hook`**, de
+   modo que cambiar el intérprete deja el `doctor` en "damaged". Los dos puntos juntos
+   dejan Windows sin salida limpia.
+
+La salida aquí: `tools/bin/python3`, un shim de dos líneas que reenvía a `python`, y los
+hooks anteponen ese directorio al PATH. El comando sigue leyendo
+`python3 -m harness hook ...`, así que el doctor lo reconoce y el shell ejecuta el
+intérprete correcto. Un `.gitattributes` mantiene su LF: con CRLF el shebang deja de
+funcionar y el arreglo se rompe solo.
+
+También salió `taskkill` de la lista deny: en este repositorio cerrar los ejecutables en
+marcha es parte del ciclo de build, porque mientras corren el linker falla con LNK1168.
+
+**Sugerencia para el harness:** resolver el intérprete en el instalador (probar `python3`,
+luego `python`, luego `py -3`) y guardar el elegido en el manifiesto, en vez de exigir una
+cadena fija. Eso quitaría los tres problemas de una vez.
+
+**Sin probar:** el RAG. Necesita levantar dos contenedores y descargar sus imágenes;
+`session open` avisa de que el índice no responde y continúa, que es lo que promete.
+
+**Estado:** build limpio, 3073/3073 checks, árbol limpio, `doctor` sano.
+
+---
+
 ## Cierre de sesión — 2026-09-03 / 04
 
 Resumen para leer primero. Debajo, en orden inverso, está el detalle de cada bloque.
