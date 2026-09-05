@@ -1,8 +1,8 @@
 # Collections that the container indexes. Paths are CONTAINER paths and do not
 # change between machines. docker-compose.yml maps the host paths from
 # .harness/env.local onto them. `python3 -m harness rag config` regenerates this file
-# from the project profile, with a code collection for the declared languages.
-global_context: "pitero: project documents, the work board, and durable memories"
+# from the project profile.
+global_context: "pitero: Convierte las partidas propias de League of Legends en una unica mision de mejora medible, con la evidencia en video que la sostiene"
 
 collections:
   repo-docs:
@@ -16,6 +16,18 @@ collections:
     context:
       "/docs/sessions": "Session close documents, one per work session"
       "/work": "The work board: sprints, epics, tasks"
+  repo-code:
+    path: /src/repo
+    pattern: "**/*.{cpp,cc,hpp,h}"
+    # third_party holds the sqlite amalgamation and the nlohmann header. Two files
+    # of 1.5 MB drown the index. build holds the generated copies of the same code.
+    ignore:
+      - "**/node_modules/**"
+      - "**/dist/**"
+      - "**/vendor/**"
+      - "**/.git/**"
+      - "**/third_party/**"
+      - "**/build/**"
   memory:
     path: /src/memory
     pattern: "**/*.md"

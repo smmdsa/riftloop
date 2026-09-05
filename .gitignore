@@ -9,6 +9,7 @@ out/
 .claude/scheduled_tasks.lock
 # harness: machine-local and cache files
 .harness/env.local
+.harness/env.wsl
 .harness/board.sqlite
 .harness/board.sqlite.tmp
 __pycache__/

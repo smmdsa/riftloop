@@ -99,6 +99,41 @@ El resto de plantillas (`.claude/rules/harness.md`, las skills, `infra/rag/up.sh
 una TASK-0001 en `sprint-001`, asi que sembrarla crearia dos con el mismo id. `upgrade` no
 la siembra; `init` si lo haria.
 
+### El indice de busqueda en WSL, y por que 8510
+
+El motor de Docker de esta maquina corre **dentro de `Ubuntu-22.04`**, no en Docker
+Desktop: el `docker` de Windows apunta a `npipe:////./pipe/dockerDesktopLinuxEngine` y esa
+tuberia no existe. Por eso `python -m harness stack ...` falla siempre aqui. Los
+contenedores se levantan desde WSL a mano:
+
+```bash
+wsl -d Ubuntu-22.04
+cd /mnt/e/pitero
+docker compose --env-file .harness/env.wsl -f infra/rag/docker-compose.yml   up -d --no-build
+docker compose --env-file .harness/env.wsl -f infra/board/docker-compose.yml up -d --no-build
+```
+
+`.harness/env.wsl` existe porque `harness env` escribe rutas de Windows en
+`.harness/env.local` y compose necesita las de WSL (`/mnt/e/pitero`). Git lo ignora, igual
+que a `env.local`. Ese archivo tambien corrige `HARNESS_MEMORY_DIR`: el harness lo calcula
+mal en Windows y apunta a `E:\pitero\memory`, que no existe; la memoria real esta en
+`C:\Users\<user>\.claude\projects\e--pitero\memory` (TASK-0007, defecto 5).
+
+**Puertos 8510, 8511 y 8512.** Hay otro repositorio con el mismo harness en esta maquina, y
+su stack toma 8410 a 8412 por defecto. Este proyecto se mueve a 8510 para que los dos
+convivan. Los tres sitios que llevan el numero son `.harness/env.wsl`, `.harness/env.local`
+y `.mcp.json`. Todo lo demas se nombra por proyecto: contenedores `pitero-rag`,
+`pitero-rag-agent` y `pitero-board`, imagenes `pitero-rag:cpu` y `pitero-board:latest`,
+volumenes `pitero-rag_*` y `pitero-board_*`.
+
+`harness ports` **no sirve de prueba aqui**: dice `free` sobre un puerto que un contenedor
+de WSL esta sirviendo (TASK-0007, defecto 6). La comprobacion real es
+`curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8510/health`.
+
+Si se cambia el puerto de `.mcp.json`, Claude Code no lo lee hasta reiniciar: abre la
+conexion MCP una vez, al arrancar el proceso. Mientras tanto se puede consultar el indice
+por HTTP contra `8510/mcp`, o parar y buscar con grep.
+
 RiftLoop es un compañero nativo de mejora para League of Legends en Windows 10/11 x64.
 El PRD [RiftLoop_PRD_v1.0.md](RiftLoop_PRD_v1.0.md) es la fuente de verdad. Antes de
 implementar una función, lee su sección `RF-*`.
