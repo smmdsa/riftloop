@@ -1,0 +1,6 @@
+# Shell scripts must keep LF. A CRLF shebang makes the shell answer
+# "bad interpreter", and tools/bin/python3 is what keeps the harness hooks
+# alive on Windows.
+*.sh        text eol=lf
+tools/bin/* text eol=lf
+infra/**/*.sh text eol=lf
