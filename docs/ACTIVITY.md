@@ -17,7 +17,8 @@ States: `active` · `paused` · `blocked` · `closed` (then move the row to the 
 
 | front | owner | state | touched | next step |
 |---|---|---|---|---|
-| Performance harness (PRD 15) | agent | active | 2026-09-05 (sprint-001) | TASK-0001: muestrear working set y CPU |
+| Performance harness (PRD 15) | agent | active | 2026-09-05 (2026-09-05-1356) | TASK-0001: muestrear working set y CPU |
+| Harness instalado en el repo | agent | active | 2026-09-05 (122ab20) | TASK-0006 levantar el RAG, TASK-0007 reportar los defectos de Windows |
 | Sincronia de clips con el reloj de partida | user | blocked | 2026-09-04 (5f0bd8c) | TASK-0005: hace falta una partida grabada entera con el binario nuevo |
 | Muestra local de runas e items | agent | paused | 2026-09-04 (a3d6751) | el filtro por matchup no se activa: 7 a 11 filas por campeon, falta volumen |
 | Escritura de runas al cliente | agent | paused | 2026-09-04 (771502d) | verificada en los cuatro caminos; apagada por defecto |
