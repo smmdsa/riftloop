@@ -35,3 +35,14 @@ son las dos piezas mas caras que se han anadido.
 ## Not covered
 
 FPS del juego y escrituras de disco. Cada uno tiene su tarea.
+
+## Observacion del usuario, 2026-09-05
+
+A ojo, sin medidor: Agent, Desktop y Overlay por debajo de 10 MB de RAM cada uno, y CPU
+y GPU al 0 %. El usuario lo lee como buen margen contra el gate de 80 MB de working set
+p95 del PRD 15.
+
+Vale como senal, no como medida. Falta lo que pide esta tarea: los seis procesos y no
+tres, la serie temporal en disco, el p95 y no el valor instantaneo, y la partida en curso
+con el overlay dibujando. Un valor en reposo no es el p95 en partida, y el gate se mide
+en partida. La GPU no es uno de los gates de PRD 15.2.
