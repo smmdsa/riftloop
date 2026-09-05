@@ -73,11 +73,31 @@ python -m harness upgrade                                     # resiembra las pl
 python -m harness doctor                                      # exit 0
 ```
 
-`upgrade` respeta lo que el proyecto posee: el manifiesto distingue los archivos `owned`
-de los `seeded`, y `.claude/settings.json` esta adoptado con `harness adopt`, asi que los
-parches de Windows (el shim de `tools/bin/python3` y `taskkill` fuera del deny)
-sobreviven. **Comprobalo igualmente la primera vez**: si `doctor` sale sano pero el hook
-deja de arrancar, mira si el comando perdio el prefijo del PATH.
+**`upgrade` no respeta del todo `.claude/settings.json`, aunque este adoptado.** Medido al
+subir de 0.1.0 a 0.2.0:
+
+- **Duplica los hooks.** Anade el juego de la plantilla junto al que ya estaba, asi que
+  cada evento dispara dos veces: el nuestro con el shim y el de la plantilla, que en
+  Windows llama al stub de la Store. `doctor` sale sano igual, porque solo busca que la
+  cadena exista.
+- **Restaura la lista `deny` de la plantilla**, y con ella `taskkill`, que aqui rompe el
+  ciclo de build.
+
+Asi que despues de cada `upgrade` hay que revisar `.claude/settings.json` a mano:
+
+1. Dejar un solo hook por evento, el que lleva `PATH="$CLAUDE_PROJECT_DIR/tools/bin:$PATH"`.
+2. Quitar `Bash(taskkill*)` del `deny`.
+3. `python -m harness adopt .claude/settings.json` y `python -m harness doctor`.
+4. Ejecutar el comando del hook tal cual, en Git Bash y no en WSL: son shells distintos con
+   rutas distintas, y en WSL el shim no esta en el PATH.
+
+El resto de plantillas (`.claude/rules/harness.md`, las skills, `infra/rag/up.sh`,
+`work/README.md`) se actualizan solas y sin sorpresas.
+
+**Cuidado con `init` despues de un upgrade:** 0.2.0 trae una plantilla
+`work/backlog/TASK-0001-start-the-harness-in-this-repository.md`. Este repositorio ya tiene
+una TASK-0001 en `sprint-001`, asi que sembrarla crearia dos con el mismo id. `upgrade` no
+la siembra; `init` si lo haria.
 
 RiftLoop es un compañero nativo de mejora para League of Legends en Windows 10/11 x64.
 El PRD [RiftLoop_PRD_v1.0.md](RiftLoop_PRD_v1.0.md) es la fuente de verdad. Antes de

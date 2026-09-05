@@ -33,3 +33,12 @@ lleva un WORK-LOG de casi 900 lineas y quince bloques de trabajo.
 ## Not covered
 
 La calidad de las respuestas del indice. Esta tarea solo comprueba que responde.
+
+## Nota del 2026-09-05, tras subir a harness 0.2.0
+
+El brief dejo de decir `RAG: BROKEN` y ahora avisa de que el 62 % del indice son trozos
+huerfanos. Pero el demonio de Docker no responde y `harness ports` da 8410, 8411 y 8412
+libres, asi que ese indice **no es el stack del harness**: hay un `qmd` accesible por otra
+via, con contenido que puede no ser de este repositorio. Antes de levantar nada, averiguar
+que responde y sobre que corpus. Indexar dos repositorios en el mismo indice explicaria
+los huerfanos.
