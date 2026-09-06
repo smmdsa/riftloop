@@ -87,7 +87,8 @@ ClipMakerResult makeClipsFromRecording(Db& db, const std::string& matchId,
     double videoLen = mediaDurationSec(rec.info.path);
     if (rec.info.gameStartOffsetSec < 0) {
         // Recordings made before the offset was captured cannot be aligned:
-        // the two clocks differ by the loading screen, over two minutes.
+        // the two clocks differ by the loading screen. Measured at 57 s on the
+        // recording of LA2_1622009391, so a blind cut lands a minute early.
         res.message = "Esa grabacion no guarda el origen del reloj de partida, asi que los "
                       "cortes caerian desplazados. Se conserva sin tocar.";
         return res;

@@ -2192,13 +2192,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp == 1 && total > 0)
                 SendMessageW(ctl(IDC_CLIP_PROGRESS), PBM_SETPOS, (WPARAM)(step * 100 / total), 0);
             if (wp == 2) {
-                SendMessageW(ctl(IDC_CLIP_PROGRESS), PBM_SETPOS, 100, 0);
                 SetWindowTextW(ctl(IDC_MAKE_CLIPS), L"Generar clips de evidencia");
                 EnableWindow(ctl(IDC_MAKE_CLIPS), TRUE);
                 if ((int)lp > 0) {
+                    SendMessageW(ctl(IDC_CLIP_PROGRESS), PBM_SETPOS, 100, 0);
                     showAnalysis(g->currentMatchId);   // reload with the clip links
                     refreshClipList();
                     refreshSettings();
+                } else {
+                    // The run made no clip. The status label sits at the top of
+                    // the panel, far from the button, so a refusal shown only
+                    // there reads as "the button does nothing". Say it here too.
+                    ShowWindow(ctl(IDC_CLIP_PROGRESS), SW_HIDE);
+                    std::string why = status.empty()
+                        ? "No se pudo generar ningun clip de esta partida."
+                        : status;
+                    MessageBoxW(g->hwnd, w(why).c_str(), L"Generar clips",
+                                MB_OK | MB_ICONINFORMATION);
                 }
             }
             return 0;

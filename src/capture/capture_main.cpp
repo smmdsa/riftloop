@@ -49,6 +49,11 @@ namespace {
 constexpr UINT32 kFps = 30;
 constexpr UINT32 kBitrate = 2'500'000;   // RF-REC-002
 constexpr int64_t kMaxBytes = 2LL * 1024 * 1024 * 1024;   // 2 GB cap (RF-REC-003)
+// The game clock origin arrives seconds after the recording starts. Ask every
+// two seconds, and stop after five minutes: the GameStart event never shows up
+// that late, and a dead API must not cost one request every two seconds.
+constexpr int64_t kOffsetRetryMs = 2'000;
+constexpr int64_t kOffsetGiveUpMs = 5 * 60 * 1000;
 
 struct CaptureApp {
     com_ptr<ID3D11Device> d3d;
@@ -67,6 +72,11 @@ struct CaptureApp {
     int64_t bytesEstimate = 0;
     HWND target = nullptr;
     std::wstring outPath;
+    // Alignment data of the sidecar. The offset starts unknown and the watchdog
+    // loop fills it in later. See writeSidecar.
+    int64_t startedAtMs = 0;
+    double startGameTimeSec = -1;
+    double gameStartOffsetSec = -1;
 };
 
 CaptureApp* g = nullptr;
@@ -88,6 +98,26 @@ HWND findWindowByTitleSubstring(const std::wstring& needle) {
     return ctx.found;
 }
 
+// Writes the sidecar that clipmaker reads to align a cut. The file is written
+// twice: once at the start, and once more when the game clock origin arrives.
+// The second write must keep the first write's values, so both come from `g`.
+void writeSidecar() {
+    nlohmann::json meta;
+    meta["start_game_time_sec"] = g->startGameTimeSec;
+    meta["game_start_offset_sec"] = g->gameStartOffsetSec;
+    meta["started_at_ms"] = g->startedAtMs;
+    meta["fps"] = kFps;
+    std::wstring sidecar = g->outPath + L".json";
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, sidecar.c_str(), L"wb") != 0 || !f) {
+        std::printf("aviso: no se pudo escribir el sidecar de alineacion\n");
+        return;
+    }
+    std::string text = meta.dump(2);
+    fwrite(text.data(), 1, text.size(), f);
+    fclose(f);
+}
+
 bool initSinkWriter() {
     std::wstring dir = (rl::util::dataDir() / "clips").wstring();
     CreateDirectoryW(dir.c_str(), nullptr);
@@ -103,24 +133,19 @@ bool initSinkWriter() {
     // Sidecar with the alignment data. Without the game clock at the moment
     // recording started, a cut cannot land on the right second (RF-REC-003).
     {
-        double gameTime = rl::liveGameTimeSec();
+        g->startGameTimeSec = rl::liveGameTimeSec();
         // Origin of the match clock inside the API clock. The Riot timeline
         // counts from 0:00, the API from when the process started; the gap is
-        // the loading screen plus the fountain wait, over two minutes.
-        double startOffset = rl::liveGameStartOffsetSec();
-        nlohmann::json meta;
-        meta["start_game_time_sec"] = gameTime;
-        meta["game_start_offset_sec"] = startOffset;
-        meta["started_at_ms"] = (int64_t)_time64(nullptr) * 1000;
-        meta["fps"] = kFps;
-        std::wstring sidecar = g->outPath + L".json";
-        FILE* f = nullptr;
-        if (_wfopen_s(&f, sidecar.c_str(), L"wb") == 0 && f) {
-            std::string text = meta.dump(2);
-            fwrite(text.data(), 1, text.size(), f);
-            fclose(f);
-        }
-        if (gameTime < 0)
+        // the loading screen plus the fountain wait. Measured on the recording
+        // of LA2_1622009391: 57 s, read from two frames 600 s apart.
+        //
+        // This read almost always fails here. Capture starts the moment the
+        // Agent sees InGame, and the API clock reads about 0.03 s then, before
+        // the GameStart event exists. The watchdog loop asks again.
+        g->gameStartOffsetSec = rl::liveGameStartOffsetSec();
+        g->startedAtMs = (int64_t)_time64(nullptr) * 1000;
+        writeSidecar();
+        if (g->startGameTimeSec < 0)
             std::printf("aviso: sin reloj de partida; los cortes automaticos no podran "
                         "alinearse\n");
     }
@@ -316,12 +341,32 @@ int wmain(int argc, wchar_t** argv) {
                 rl::util::narrow(app.outPath).c_str());
 
     int64_t start = GetTickCount64();
+    int64_t lastOffsetTry = 0;
     while (app.running) {
         Sleep(250);
         if (!IsWindow(app.target)) app.running = false;               // window closed
         if (seconds > 0 && GetTickCount64() - start > (int64_t)seconds * 1000)
             app.running = false;
+        // The GameStart event does not exist yet when the recording starts, so
+        // the read in initSinkWriter returns -1 and clipmaker refuses to cut.
+        // Ask again until the event appears, then write the sidecar again.
+        // Frames arrive on the frame pool threads, so a slow read here costs no
+        // frame. It only delays the two checks above (RF-REC-003).
+        const int64_t now = (int64_t)GetTickCount64();
+        if (app.gameStartOffsetSec < 0 && now - start < kOffsetGiveUpMs &&
+            now - lastOffsetTry >= kOffsetRetryMs) {
+            lastOffsetTry = now;
+            double off = rl::liveGameStartOffsetSec();
+            if (off >= 0) {
+                app.gameStartOffsetSec = off;
+                writeSidecar();
+                std::printf("origen del reloj de partida: %.3f s\n", off);
+            }
+        }
     }
+    if (app.gameStartOffsetSec < 0)
+        std::printf("aviso: el evento GameStart nunca llego; esta grabacion no se podra "
+                    "cortar\n");
 
     app.session.Close();
     app.pool.Close();
