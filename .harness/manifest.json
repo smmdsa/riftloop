@@ -52,7 +52,7 @@
     ".claude/skills/session-close/SKILL.md": {
       "kind": "owned",
       "template": ".claude/skills/session-close/SKILL.md",
-      "sha256": "f389eb8cbf810777a37b14e2f5e42584c5e140e69eef7ea9e9b88ef72d8e7195"
+      "sha256": "9c6d929ab5ed084f237397f8159e71d564f001bb14a6b0fe0ab49da20a23be10"
     },
     ".claude/skills/session-start/SKILL.md": {
       "kind": "owned",
@@ -120,12 +120,12 @@
     "infra/rag/README.md": {
       "kind": "owned",
       "template": "infra/rag/README.md",
-      "sha256": "acad491e8784e710d945cfbc28dc38f9ea477bde160b161a9163ad467daf5b6a"
+      "sha256": "1b09148ba8c0092e79b3d14262c3825ffa5777caf671c2c2165cf9cff8bbd889"
     },
     "infra/rag/agent/agent.py": {
       "kind": "owned",
       "template": "infra/rag/agent/agent.py",
-      "sha256": "c1d2f0400ce6be920a5c3dc797ada4376cdf95f2e24cdd0727e16024c6478177"
+      "sha256": "47789bb0088bf7dc4366d389041afa264d20641d464d35a69a9df87c8b89feb6"
     },
     "infra/rag/bun.lock": {
       "kind": "owned",
@@ -144,7 +144,7 @@
     "infra/rag/docker-compose.yml": {
       "kind": "owned",
       "template": "infra/rag/docker-compose.yml",
-      "sha256": "05df572e9254e90de2fc7e15dd446e352c5dd3c6927e4e6a71b7ce14138e8737"
+      "sha256": "f30f6151274f6e31d1e8fb896260e9f692f50bc25ff4d29b8dd42034a4a849ab"
     },
     "infra/rag/package.json": {
       "kind": "owned",
