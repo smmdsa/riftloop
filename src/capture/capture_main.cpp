@@ -119,7 +119,7 @@ void writeSidecar() {
 }
 
 bool initSinkWriter() {
-    std::wstring dir = (rl::util::dataDir() / "clips").wstring();
+    std::wstring dir = rl::util::clipsDir().wstring();
     CreateDirectoryW(dir.c_str(), nullptr);
     if (g->outPath.empty()) {
         SYSTEMTIME st;

@@ -82,6 +82,23 @@ fs::path dataDir() {
     return dir;
 }
 
+fs::path clipsDir() {
+    return dataDir() / "clips";
+}
+
+fs::path clipDirFor(const std::string& matchId) {
+    // A match id is "LA2_1622009391" today, but the folder name must hold even
+    // if that changes. Anything else becomes '_', so no id can escape the tree.
+    std::string safe;
+    for (char c : matchId) {
+        bool plain = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+                     (c >= 'a' && c <= 'z') || c == '_' || c == '-';
+        safe += plain ? c : '_';
+    }
+    if (safe.empty()) safe = "match";
+    return clipsDir() / safe;
+}
+
 fs::path cacheDir() {
     fs::path d = dataDir() / "cache";
     std::error_code ec;

@@ -30,7 +30,7 @@ Aligned findRecording(Db& db, const std::string& matchId, MatchSummary* summaryO
     auto m = parseMatch(db.matchJson(matchId));
     if (!m) return out;
     if (summaryOut) *summaryOut = *m;
-    auto all = listRecordings((util::dataDir() / "clips").wstring());
+    auto all = listRecordings(util::clipsDir().wstring());
     // A crashed recording leaves a truncated MP4 with no index next to the good
     // one. Media Foundation cannot read it, so skip to the next candidate
     // instead of failing every cut.
@@ -93,7 +93,7 @@ ClipMakerResult makeClipsFromRecording(Db& db, const std::string& matchId,
                       "cortes caerian desplazados. Se conserva sin tocar.";
         return res;
     }
-    fs::path clipDir = util::dataDir() / "clips";
+    fs::path clipDir = util::clipDirFor(matchId);
     std::error_code ec;
     fs::create_directories(clipDir, ec);
 

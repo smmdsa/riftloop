@@ -598,20 +598,27 @@ struct RecordingsInfo {
     int      files = 0;
     int64_t  bytes = 0;
     int      clipFiles = 0;
+    int64_t  clipBytes = 0;
 };
 
 RecordingsInfo recordingsInfo() {
     RecordingsInfo info;
     std::error_code ec;
-    auto dir = util::dataDir() / "clips";
+    auto dir = util::clipsDir();
     if (!std::filesystem::exists(dir, ec)) return info;
-    for (auto& e : std::filesystem::directory_iterator(dir, ec)) {
+    // The full recordings sit at the top level. The cut clips live one folder
+    // per match under it, so the walk goes down to reach them. Only .mp4 counts:
+    // a flat count also caught the .mp4.json sidecars and reported them as
+    // recordings.
+    for (auto& e : std::filesystem::recursive_directory_iterator(dir, ec)) {
         if (!e.is_regular_file(ec)) continue;
-        if (isFullRecording(e.path().filename().string())) {
+        if (e.path().extension() != ".mp4") continue;
+        if (e.path().parent_path() == dir && isFullRecording(e.path().filename().string())) {
             ++info.files;
             info.bytes += (int64_t)e.file_size(ec);
         } else {
             ++info.clipFiles;
+            info.clipBytes += (int64_t)e.file_size(ec);
         }
     }
     return info;
@@ -1193,9 +1200,9 @@ void refreshClipList() {
     releaseClipThumbs();
     g->clipRowFiles.clear();
     std::vector<RVItem> items;
-    auto dir = util::dataDir() / "clips";
 
     if (!g->currentMatchId.empty()) {
+        auto dir = util::clipDirFor(g->currentMatchId);
         if (auto a = g->db->loadAnalysis(g->currentMatchId)) {
             std::set<std::string> seen;      // one card per clip, never a repeat
             for (auto& f : a->findings) {
@@ -1259,7 +1266,7 @@ void playClipRow(int row, bool autoplay) {
         }
         bindPlayerHost(host, g->player.get());
     }
-    auto path = util::dataDir() / "clips" / g->clipRowFiles[row];
+    auto path = util::clipDirFor(g->currentMatchId) / g->clipRowFiles[row];
     if (!g->player->load(path.wstring())) {
         setText(IDC_CLIP_STATUS, "No se pudo abrir el clip.");
         return;
@@ -1344,60 +1351,103 @@ void makeClipsForCurrentMatch() {
 }
 
 void openRecordingsFolder() {
-    auto dir = util::dataDir() / "clips";
+    auto dir = util::clipsDir();
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
     ShellExecuteW(g->hwnd, L"open", dir.wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
-// Deletes the oldest full recordings until the folder is under the quota.
-// Evidence clips are never touched, and nothing goes without confirmation:
-// this is the user's own video (PRD 16.3).
+// "Liberar espacio". The two kinds of file cost different things: a full
+// recording is a gigabyte of raw footage, and a clip is the proof behind a
+// diagnosis. So the user picks which of the two goes, with both sizes on
+// screen. Nothing is deleted without that pick: this is the user's own video
+// (PRD 16.3).
 void pruneRecordings() {
     RecordingsInfo info = recordingsInfo();
-    if (info.bytes <= kRecordingQuotaBytes) {
-        MessageBoxW(g->hwnd, L"Las grabaciones ya están por debajo del límite.", L"RiftLoop",
+    if (info.files == 0 && info.clipFiles == 0) {
+        MessageBoxW(g->hwnd, L"No hay grabaciones ni clips que borrar.", L"Liberar espacio",
                     MB_OK | MB_ICONINFORMATION);
         return;
     }
-    std::error_code ec;
-    auto dir = util::dataDir() / "clips";
-    std::vector<std::pair<std::filesystem::file_time_type, std::filesystem::path>> files;
-    for (auto& e : std::filesystem::directory_iterator(dir, ec)) {
-        if (!e.is_regular_file(ec)) continue;
-        if (!isFullRecording(e.path().filename().string())) continue;
-        files.push_back({e.last_write_time(ec), e.path()});
-    }
-    std::sort(files.begin(), files.end(), [](auto& a, auto& b) { return a.first < b.first; });
 
-    int64_t total = info.bytes;
+    const int kOnlyRecordings = 101, kEverything = 102;
+    std::wstring bRec = L"Borrar solo las grabaciones completas\nLibera " + humanSize(info.bytes) +
+                        L". Los " + std::to_wstring(info.clipFiles) +
+                        L" clips de evidencia se conservan.";
+    std::wstring bAll = L"Borrar todo\nLibera " + humanSize(info.bytes + info.clipBytes) +
+                        L". Los diagnósticos se quedan sin su prueba en vídeo.";
+    TASKDIALOG_BUTTON buttons[2] = {{kOnlyRecordings, bRec.c_str()}, {kEverything, bAll.c_str()}};
+
+    std::wstring content = L"Grabaciones completas: " + std::to_wstring(info.files) + L" · " +
+                           humanSize(info.bytes) + L"\nClips de evidencia: " +
+                           std::to_wstring(info.clipFiles) + L" · " + humanSize(info.clipBytes) +
+                           L"\n\nEsto no se puede deshacer.";
+    TASKDIALOGCONFIG cfg = {};
+    cfg.cbSize = sizeof cfg;
+    cfg.hwndParent = g->hwnd;
+    cfg.dwFlags = TDF_USE_COMMAND_LINKS | TDF_POSITION_RELATIVE_TO_WINDOW;
+    cfg.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+    cfg.pszWindowTitle = L"Liberar espacio";
+    cfg.pszMainIcon = TD_WARNING_ICON;
+    cfg.pszMainInstruction = L"¿Qué quieres borrar?";
+    cfg.pszContent = content.c_str();
+    cfg.pButtons = buttons;
+    cfg.cButtons = 2;
+    cfg.nDefaultButton = kOnlyRecordings;
+    int pressed = 0;
+    if (FAILED(TaskDialogIndirect(&cfg, &pressed, nullptr, nullptr))) return;
+    if (pressed != kOnlyRecordings && pressed != kEverything) return;
+    const bool alsoClips = pressed == kEverything;
+
+    // Collect first, delete after. Removing a file under the feet of a
+    // directory iterator is not defined.
+    std::error_code ec;
+    auto dir = util::clipsDir();
     std::vector<std::filesystem::path> doomed;
-    for (auto& [when, path] : files) {
-        if (total <= kRecordingQuotaBytes) break;
-        total -= (int64_t)std::filesystem::file_size(path, ec);
-        doomed.push_back(path);
+    int recFiles = 0, clipFiles = 0;
+    int64_t freed = 0;
+    for (auto& e : std::filesystem::recursive_directory_iterator(dir, ec)) {
+        if (!e.is_regular_file(ec)) continue;
+        const bool top = e.path().parent_path() == dir;
+        // At the top level the name test also catches the .mp4.json sidecar,
+        // which is what we want: a recording leaves with its alignment data.
+        if (top && isFullRecording(e.path().filename().string())) {
+            if (e.path().extension() == ".mp4") ++recFiles;
+        } else if (alsoClips && !top) {
+            ++clipFiles;
+        } else {
+            continue;
+        }
+        freed += (int64_t)e.file_size(ec);
+        doomed.push_back(e.path());
     }
     if (doomed.empty()) return;
-
-    std::wstring msg = L"Se borrarán " + std::to_wstring(doomed.size()) +
-                       L" grabaciones completas, las más antiguas:\n\n";
-    for (auto& p2 : doomed) msg += L"  " + p2.filename().wstring() + L"\n";
-    msg += L"\nQuedarán " + humanSize(total) + L". Los clips de evidencia no se tocan.\n"
-           L"Esto no se puede deshacer. ¿Continuar?";
-    if (MessageBoxW(g->hwnd, msg.c_str(), L"Liberar espacio", MB_YESNO | MB_ICONWARNING) != IDYES)
-        return;
 
     int removed = 0;
     for (auto& p2 : doomed)
         if (std::filesystem::remove(p2, ec)) ++removed;
-    g->db->audit("recordings_pruned",
-                 json{{"removed", removed}, {"bytes_left", total}}.dump());
-    setText(IDC_PROFILE_STATUS, std::to_string(removed) + " grabaciones borradas.");
+    if (alsoClips)
+        for (auto& e : std::filesystem::directory_iterator(dir, ec))
+            if (e.is_directory(ec)) std::filesystem::remove(e.path(), ec);   // only if empty
+
+    g->db->audit("recordings_cleaned", json{{"recordings", recFiles},
+                                            {"clips", clipFiles},
+                                            {"files_removed", removed},
+                                            {"files_planned", (int)doomed.size()},
+                                            {"freed_bytes", freed}}
+                                           .dump());
+    std::string status = std::to_string(recFiles) + " grabaciones y " +
+                         std::to_string(clipFiles) + " clips borrados.";
+    if (removed < (int)doomed.size())
+        status += " " + std::to_string((int)doomed.size() - removed) +
+                  " archivo(s) siguen en disco: estaban en uso.";
+    setText(IDC_PROFILE_STATUS, status);
     refreshSettings();
+    if (g->currentPage == 2) refreshClipList();
 }
 
 void openClip(const std::string& fileName) {
-    auto path = util::dataDir() / "clips" / fileName;
+    auto path = util::clipDirFor(g->currentMatchId) / fileName;
     if (!std::filesystem::exists(path)) {
         MessageBoxW(g->hwnd, L"El clip ya no está en disco.", L"RiftLoop",
                     MB_OK | MB_ICONWARNING);

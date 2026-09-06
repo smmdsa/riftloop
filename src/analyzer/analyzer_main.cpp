@@ -282,7 +282,7 @@ int makeClips(Db& db, Lcu& lcu, const std::string& matchId) {
         return 1;
     }
 
-    fs::path clipDir = util::dataDir() / "clips";
+    fs::path clipDir = util::clipDirFor(matchId);
     std::error_code ec;
     fs::create_directories(clipDir, ec);
 
@@ -522,7 +522,7 @@ int main(int argc, char** argv) {
             CutRequest c;
             c.startSec = at;
             c.durationSec = 20;
-            c.outPath = (util::dataDir() / "clips" / "cuttest.mp4").wstring();
+            c.outPath = (util::clipsDir() / "cuttest.mp4").wstring();
             auto t0 = GetTickCount64();
             CutResult r = cutClips(src, {c});
             std::printf("cortes: %d en %llu ms  %s\n", r.written,

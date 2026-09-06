@@ -20,6 +20,13 @@ namespace rl::util {
 std::filesystem::path dataDir();
 std::filesystem::path cacheDir();    // dataDir()/cache
 
+// dataDir()/clips holds the full recordings, one file per game.
+std::filesystem::path clipsDir();
+// clipsDir()/<matchId> holds the cut clips of one match. One folder per match
+// keeps them apart from the recordings. Neither call creates the folder: the
+// writer creates it, so a reader never litters the tree with empty folders.
+std::filesystem::path clipDirFor(const std::string& matchId);
+
 std::wstring widen(const std::string& utf8);
 std::string  narrow(const std::wstring& wide);
 
