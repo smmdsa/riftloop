@@ -45,10 +45,23 @@ muestra con la numeración del cliente vía `Ddragon::displayPatch` (ddragon 16.
 --apply-runes <Campeon> <ROL>         --undo-runes
 --cut-test <mp4> <seg>                --frame <mp4> <seg> <png>
 --report          --show <id>         --wipe
+--export-fixture <id|last> <archivo>  --heatmap [N] [ROL]
+--curves <id|last>                    --rofl-stats <id|last>
+--ranks <id|last> [refresh|force] [participantId]
 ```
 
 `--frame` vuelca un fotograma a PNG: es la forma de comprobar que un clip cae donde dice
 (el reloj del juego se lee en la esquina superior derecha).
+
+`--heatmap`, `--curves`, `--rofl-stats` y `--ranks` son las vistas de EP-03 en texto: cada
+una imprime los mismos numeros que dibuja el Desktop, para poder comprobarlos sin abrir una
+ventana. `--export-fixture` saca una partida de la base ya anonimizada, que es la unica
+forma de meter datos reales en `tests/fixtures/`.
+
+`--ranks ... refresh` gasta cuota de la API de Riot: dos llamadas por jugador, espaciadas
+1300 ms para caber en la cuota de una clave de desarrollo. Solo funciona sobre una partida
+ya guardada; un id que no este en la tabla `matches` se rechaza antes de mirar la clave, y
+esa es la barrera contra el scouting de champion select (PRD 17.2).
 
 ### Actualizar el harness
 
@@ -162,8 +175,14 @@ Community) y el CMake/Ninja embebidos de VS.
 build.cmd            :: configura + compila debug (build\x64-debug)
 build.cmd release
 build.cmd test       :: compila + ctest
+buildt.cmd <target>... :: compila solo esos targets
 build\x64-debug\riftloop_tests.exe   :: ejecuta la suite directamente
 ```
+
+`buildt.cmd` existe porque `build.cmd` falla con `LNK1168` cuando el usuario tiene el
+Desktop, el Agent o el Overlay abiertos: el enlazador no puede escribir un exe en uso.
+Con `buildt.cmd RiftLoop.Analyzer riftloop_tests` se compila lo que hace falta sin
+cerrarle la aplicacion al usuario.
 
 Los presets están en `CMakePresets.json` (`x64-debug`, `x64-release`). La suite es un solo
 ejecutable con macros `CHECK`; no hay gtest. Deuda conocida frente al PRD §14.1: el Desktop
