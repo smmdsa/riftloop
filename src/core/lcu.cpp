@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <tlhelp32.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <sstream>
 
@@ -134,13 +135,19 @@ std::string Lcu::gameflowPhase() {
 
 namespace {
 
-void addUnique(std::vector<int>& out, int id) {
-    if (id <= 0) return;
-    for (int v : out) if (v == id) return;
-    out.push_back(id);
+bool contains(const std::vector<int>& v, int id) {
+    for (int x : v) if (x == id) return true;
+    return false;
 }
 
 } // namespace
+
+std::vector<int> ChampSelectView::allBanIds() const {
+    std::vector<int> all = allyBanIds;
+    all.insert(all.end(), enemyBanIds.begin(), enemyBanIds.end());
+    all.insert(all.end(), unknownBanIds.begin(), unknownBanIds.end());
+    return all;
+}
 
 std::optional<ChampSelectView> parseChampSelect(const std::string& sessionJson,
                                                 const std::string& pickableJson) {
@@ -148,38 +155,75 @@ std::optional<ChampSelectView> parseChampSelect(const std::string& sessionJson,
     try {
         json j = json::parse(sessionJson);
         ChampSelectView v;
+        std::vector<int> myCells, theirCells;
         int localCell = j.value("localPlayerCellId", -1);
-        for (auto& p : j.value("myTeam", json::array())) {
-            int champ = p.value("championId", 0);
-            int hover = p.value("championPickIntent", 0);
-            if (p.value("cellId", -2) == localCell) {
-                v.localChampionId = champ;
-                v.localHoverChampionId = hover;
-                v.assignedRole = p.value("assignedPosition", "");
-                // LCU uses lowercase ("bottom"); normalize to match-v5 casing.
-                for (auto& ch : v.assignedRole) ch = (char)toupper((unsigned char)ch);
-                if (v.assignedRole == "BOT") v.assignedRole = "BOTTOM";
-            } else {
-                // Before the lock the client shows the ally hover; use it.
-                addUnique(v.allyChampionIds, champ > 0 ? champ : hover);
+
+        // Seats follow the cell order of the client, so a player keeps the same
+        // index for the whole draft. The client usually lists the team in that
+        // order already; sorting makes it a guarantee instead of a hope.
+        auto readSide = [](const json& team, std::array<ChampSelectSeat, 5>& seats,
+                           std::vector<int>& cells) {
+            std::vector<std::pair<int, ChampSelectSeat>> byCell;
+            for (auto& p : team) {
+                int cell = p.value("cellId", -1);
+                if (cell >= 0) cells.push_back(cell);
+                int champ = p.value("championId", 0);
+                // Before the lock the client shows the pick intent. It is real
+                // and it can still change, so it stays a hover, not a pick.
+                int hover = p.value("championPickIntent", 0);
+                ChampSelectSeat seat;
+                if (champ > 0) seat = {champ, PickState::Locked};
+                else if (hover > 0) seat = {hover, PickState::Hover};
+                byCell.push_back({cell, seat});
             }
+            std::sort(byCell.begin(), byCell.end(),
+                      [](const auto& a, const auto& b) { return a.first < b.first; });
+            for (size_t i = 0; i < byCell.size() && i < seats.size(); ++i)
+                seats[i] = byCell[i].second;
+            return byCell;
+        };
+
+        auto myByCell = readSide(j.value("myTeam", json::array()), v.allySeats, myCells);
+        readSide(j.value("theirTeam", json::array()), v.enemySeats, theirCells);
+        for (size_t i = 0; i < myByCell.size() && i < v.allySeats.size(); ++i)
+            if (myByCell[i].first == localCell) v.localSeat = (int)i;
+
+        for (auto& p : j.value("myTeam", json::array())) {
+            if (p.value("cellId", -2) != localCell) continue;
+            v.assignedRole = p.value("assignedPosition", "");
+            // LCU uses lowercase ("bottom"); normalize to match-v5 casing.
+            for (auto& ch : v.assignedRole) ch = (char)toupper((unsigned char)ch);
+            if (v.assignedRole == "BOT") v.assignedRole = "BOTTOM";
         }
-        for (auto& p : j.value("theirTeam", json::array())) {
-            int champ = p.value("championId", 0);
-            addUnique(v.enemyChampionIds, champ > 0 ? champ : p.value("championPickIntent", 0));
-        }
-        // Bans live in two places. The summary lists fill late in some client
-        // builds, so read the completed ban actions too (RF-CS-001).
-        for (auto& group : j.value("actions", json::array()))
-            for (auto& a : group)
-                if (a.value("type", "") == "ban" && a.value("completed", false))
-                    addUnique(v.banIds, a.value("championId", 0));
+
+        // A ban belongs to one side only. Adding it twice would show the same
+        // champion on both, so a bucket takes an id no other bucket holds.
+        auto addBan = [&v](std::vector<int>& bucket, int id) {
+            if (id <= 0) return;
+            for (const auto* side : {&v.allyBanIds, &v.enemyBanIds, &v.unknownBanIds})
+                for (int b : *side)
+                    if (b == id) return;
+            bucket.push_back(id);
+        };
+        // Bans live in two places. The summary lists say the side outright, so
+        // they go first. They fill late in some client builds, so the completed
+        // ban actions fill the rest and name their side by the actor cell
+        // (RF-CS-001). A cell that belongs to no listed team stays unknown: the
+        // client did not say whose ban it is, and neither do we.
         if (j.contains("bans")) {
             for (auto& b : j["bans"].value("myTeamBans", json::array()))
-                addUnique(v.banIds, b.get<int>());
+                addBan(v.allyBanIds, b.get<int>());
             for (auto& b : j["bans"].value("theirTeamBans", json::array()))
-                addUnique(v.banIds, b.get<int>());
+                addBan(v.enemyBanIds, b.get<int>());
         }
+        for (auto& group : j.value("actions", json::array()))
+            for (auto& a : group) {
+                if (a.value("type", "") != "ban" || !a.value("completed", false)) continue;
+                int actor = a.value("actorCellId", -1);
+                bool mine = contains(myCells, actor), theirs = contains(theirCells, actor);
+                addBan(mine ? v.allyBanIds : theirs ? v.enemyBanIds : v.unknownBanIds,
+                       a.value("championId", 0));
+            }
         if (!pickableJson.empty()) {
             try {
                 for (auto& id : json::parse(pickableJson))

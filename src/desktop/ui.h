@@ -58,7 +58,18 @@ void drawBitmap(HDC dc, HBITMAP bmp, int x, int y, int size);
 
 // ------------------------------------------------------------- report view
 // Item kinds for the ReportView control.
-enum class RVKind { Title, Section, Text, Dim, IconRow, Badge, Spacer, ClipCard };
+enum class RVKind { Title, Section, Text, Dim, IconRow, Badge, Spacer, ClipCard, TeamStrip };
+
+// One champion in a draft strip. An empty seat keeps its place, so a pick that
+// lands late never moves the ones already drawn.
+struct RVSeat {
+    std::string  champion;           // ddragon id; empty = the seat is open
+    std::string  iconUrl;
+    bool         banned = false;     // drawn dimmed and struck through
+    bool         hover = false;      // picked but not locked: it can still change
+    bool         isUser = false;     // the user's own champion
+    std::wstring label;              // role or position, under the portrait
+};
 
 struct RVItem {
     RVKind kind = RVKind::Text;
@@ -75,6 +86,12 @@ struct RVItem {
     HBITMAP      thumb = nullptr;
     std::wstring subtitle;
     bool         selected = false;
+    // TeamStrip only: two rows of portraits facing each other. left is drawn
+    // left-aligned in leftColor, right is right-aligned in rightColor, and
+    // `text` names the row between them.
+    std::vector<RVSeat> leftSeats, rightSeats;
+    COLORREF     leftColor = 0, rightColor = 0;
+    bool         compact = false;    // smaller portraits: the bans row
 };
 
 // wParam = item index, lParam = the view HWND.

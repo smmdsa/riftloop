@@ -442,7 +442,11 @@ int main(int argc, char** argv) {
             pi.champion = argv[2];
             pi.role = argv[3];
             pi.draft.role = pi.role;
-            for (int k = 4; k < argc; ++k) pi.draft.enemyChampions.push_back(argv[k]);
+            {
+                std::vector<std::string> enemies;
+                for (int k = 4; k < argc; ++k) enemies.push_back(argv[k]);
+                pi.draft.setEnemyChampions(enemies);
+            }
             if (!ddOk || !dd.champion(pi.champion)) {
                 std::printf("error: campeon desconocido en el parche instalado\n");
                 return 2;
@@ -586,7 +590,11 @@ int main(int argc, char** argv) {
             pi.role = argv[3];
             // Optional enemy picks let the matchup logic be checked without a
             // live champion select.
-            for (int k = 4; k < argc; ++k) pi.draft.enemyChampions.push_back(argv[k]);
+            {
+                std::vector<std::string> enemies;
+                for (int k = 4; k < argc; ++k) enemies.push_back(argv[k]);
+                pi.draft.setEnemyChampions(enemies);
+            }
             pi.draft.role = pi.role;
             if (!ddOk || !dd.champion(pi.champion)) {
                 std::printf("error: campeon desconocido en el parche instalado\n");
@@ -601,6 +609,7 @@ int main(int argc, char** argv) {
                         rp.draftClosed ? "draft cerrado, plan definitivo"
                                        : "draft abierto, plan provisional");
             std::printf("\n[Runas] confianza %s\n", rp.confidence.c_str());
+            std::printf("  %s\n", rp.main.intent.c_str());
             for (size_t k = 0; k < rp.main.perks.size(); ++k) {
                 int perk = rp.main.perks[k];
                 std::string name = k >= 6 ? dd.shardName(perk) : dd.perkName(perk);
@@ -608,10 +617,14 @@ int main(int argc, char** argv) {
                             name.c_str());
             }
             for (auto& r : rp.main.reasons) std::printf("  - %s\n", r.c_str());
-            if (rp.situational)
+            if (rp.situational) {
+                std::printf("  [alt] %s\n", rp.situational->intent.c_str());
+                for (size_t k = 4; k <= 5 && k < rp.situational->perks.size(); ++k)
+                    std::printf("  [alt] %d %s\n", rp.situational->perks[k],
+                                dd.perkName(rp.situational->perks[k]).c_str());
                 for (auto& r : rp.situational->reasons)
                     std::printf("  [alt] %s\n", r.c_str());
-            else
+            } else
                 std::printf("  [alt] sin alternativa: %s\n",
                             rp.noAlternativeReason.c_str());
             ItemPlan ip = planItems(db, dd, pi);

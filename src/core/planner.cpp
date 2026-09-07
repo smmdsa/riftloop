@@ -173,6 +173,18 @@ bool isAp(const Ddragon& dd, const std::string& champ) {
     const ChampInfo* c = dd.champion(champ);
     return c && c->magic > c->attack;
 }
+// The pattern a primary tree goes for. One line each, and they must not read
+// alike: the user compares two pages by these words (RF-RUN-002).
+const char* primaryPattern(int style) {
+    switch (style) {
+        case kPrecision:  return "dano sostenido y peleas largas";
+        case kDomination: return "picos de dano contra el objetivo debil";
+        case kSorcery:    return "escalado y alcance de habilidades";
+        case kResolve:    return "aguante en linea y desgaste";
+        default:          return "tempo temprano y economia";   // kInspiration
+    }
+}
+
 bool isTanky(const Ddragon& dd, const std::string& champ) {
     const ChampInfo* c = dd.champion(champ);
     if (!c) return false;
@@ -190,7 +202,7 @@ void validateRunePage(const Ddragon& dd, RunePage& page, bool* degraded) {
 
 RunePlan planRunes(Db& db, const Ddragon& dd, const PlanInput& in) {
     RunePlan plan;
-    CompTraits enemy = dd.teamTraits(in.draft.enemyChampions);
+    CompTraits enemy = dd.teamTraits(in.draft.enemyChampions());
     std::string tag = mainTag(dd, in.champion);
 
     StyleTemplate prim = primaryFor(tag);
@@ -203,7 +215,7 @@ RunePlan planRunes(Db& db, const Ddragon& dd, const PlanInput& in) {
     // The sample is asked for what was played into a comp like this one, so
     // the keystone answers the matchup and not only popularity.
     ThreatContext threat;
-    threat.known = !in.draft.enemyChampions.empty();
+    threat.known = !in.draft.enemyChampions().empty();
     threat.burst = enemy.burst;
     threat.cc = enemy.cc;
     auto meta = metaRunes(db, in.champion, in.role, family, threat);
@@ -273,6 +285,14 @@ RunePlan planRunes(Db& db, const Ddragon& dd, const PlanInput& in) {
         ? "Fragmento de vida en el segundo slot: la amenaza rival es burst o CC, no DPS"
         : "Dos fragmentos adaptativos: nada en la comp rival obliga a cambiar por vida");
 
+    // What this page goes for. The primary tree names the pattern; the second
+    // half says what the page pays for it, and only when a real enemy trait
+    // forced the payment (PRD 3.3).
+    page.intent = std::string("Busca ") + primaryPattern(page.primaryStyle) + ", y " +
+                  (subFromThreat ? (vsCc ? "paga tenacidad contra el CC rival"
+                                         : "paga aguante contra el burst rival")
+                                 : "no cede dano: nada en la comp rival lo obliga");
+
     bool degraded = false;
     validateRunePageImpl(dd, page, &degraded);
     plan.main = page;
@@ -303,16 +323,22 @@ RunePlan planRunes(Db& db, const Ddragon& dd, const PlanInput& in) {
         int         perk4;
         int         perk5;
         const char* reason;
+        // The trade this page makes. It must name what the user gives up, or
+        // the two pages read as the same choice with different icons.
+        const char* intent;
     };
     const AltCandidate candidates[] = {
         // Each pair must come from different rows of Resolve: 8444 is row 2,
         // 8242/8451/8453 are row 3, 8473 is row 2.
         {enemy.cc >= 2.0, " (vs CC en cadena)", 8444, 8242,
-         "Alternativa con tenacidad: si el CC dirigido decide las peleas, no el daño"},
+         "Alternativa con tenacidad: si el CC dirigido decide las peleas, no el daño",
+         "Cambia dano por tenacidad: sales del CC antes y llegas a usar tu kit"},
         {enemy.burst >= 1.8, " (vs burst)", 8473, 8451,
-         "Alternativa defensiva: si el burst rival te elimina antes de que juegues"},
+         "Alternativa defensiva: si el burst rival te elimina antes de que juegues",
+         "Cambia dano por aguante: sobrevives al primer golpe y respondes despues"},
         {enemy.sustainedDps >= 1.5, " (vs DPS sostenido)", 8444, 8453,
-         "Alternativa con sustain: si las peleas largas se deciden por regeneracion"},
+         "Alternativa con sustain: si las peleas largas se deciden por regeneracion",
+         "Cambia dano por regeneracion: ganas los intercambios que se alargan"},
     };
     for (auto& c : candidates) {
         if (!c.applies) continue;
@@ -325,6 +351,7 @@ RunePlan planRunes(Db& db, const Ddragon& dd, const PlanInput& in) {
         alt.perks[4] = a1;
         alt.perks[5] = a2;
         alt.reasons = {c.reason};
+        alt.intent = c.intent;
         bool d2 = false;
         validateRunePageImpl(dd, alt, &d2);
         plan.situational = alt;
@@ -345,7 +372,7 @@ RunePlan planRunes(Db& db, const Ddragon& dd, const PlanInput& in) {
 
 SpellPlan planSpells(const Ddragon& dd, const PlanInput& in) {
     SpellPlan plan;
-    CompTraits enemy = dd.teamTraits(in.draft.enemyChampions);
+    CompTraits enemy = dd.teamTraits(in.draft.enemyChampions());
 
     // Decision priority (RF-SUM-001): real role first, hard constraints next.
     if (in.role == "JUNGLE") {
@@ -382,7 +409,7 @@ SpellPlan planSpells(const Ddragon& dd, const PlanInput& in) {
 
 ItemPlan planItems(Db& db, const Ddragon& dd, const PlanInput& in) {
     ItemPlan plan;
-    CompTraits enemy = dd.teamTraits(in.draft.enemyChampions);
+    CompTraits enemy = dd.teamTraits(in.draft.enemyChampions());
     bool ap = isAp(dd, in.champion);
     bool tank = isTanky(dd, in.champion);
 
@@ -456,10 +483,10 @@ ItemPlan planItems(Db& db, const Ddragon& dd, const PlanInput& in) {
 
 std::vector<QuizQuestion> buildQuiz(const Ddragon& dd, const PlanInput& in) {
     std::vector<QuizQuestion> qs;
-    if (in.draft.enemyChampions.empty()) return qs;
+    if (in.draft.enemyChampions().empty()) return qs;
 
-    CompTraits enemy = dd.teamTraits(in.draft.enemyChampions);
-    CompTraits ally = dd.teamTraits(in.draft.allyChampions);
+    CompTraits enemy = dd.teamTraits(in.draft.enemyChampions());
+    CompTraits ally = dd.teamTraits(in.draft.allyChampions());
 
     // Q1: main enemy damage source (RF-QUIZ-002).
     {
@@ -477,11 +504,11 @@ std::vector<QuizQuestion> buildQuiz(const Ddragon& dd, const PlanInput& in) {
     {
         std::string best;
         double bestCc = 0;
-        for (auto& e : in.draft.enemyChampions) {
+        for (auto& e : in.draft.enemyChampions()) {
             double cc = dd.traits(e).cc;
             if (cc > bestCc) { bestCc = cc; best = e; }
         }
-        if (!best.empty() && in.draft.enemyChampions.size() >= 2) {
+        if (!best.empty() && in.draft.enemyChampions().size() >= 2) {
             QuizQuestion q;
             q.conceptTag = "cc-a-respetar";
             q.text = "¿Que campeon rival concentra el CC que debes respetar?";
@@ -489,7 +516,7 @@ std::vector<QuizQuestion> buildQuiz(const Ddragon& dd, const PlanInput& in) {
                 const ChampInfo* c = dd.champion(id);
                 return c ? c->name : id;     // localized name
             };
-            for (auto& e : in.draft.enemyChampions) {
+            for (auto& e : in.draft.enemyChampions()) {
                 q.options.push_back(display(e));
                 if (e == best) q.correctIndex = (int)q.options.size() - 1;
                 if (q.options.size() == 4) break;

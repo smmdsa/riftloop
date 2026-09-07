@@ -98,17 +98,43 @@ std::vector<std::string> namesOf(const std::vector<int>& ids) {
     return out;
 }
 
+// Seats keep their index: an empty seat stays empty instead of collapsing, so
+// a pick that lands late never moves the ones already on screen.
+std::array<DraftPick, 5> seatsOf(const std::array<ChampSelectSeat, 5>& seats) {
+    std::array<DraftPick, 5> out{};
+    for (size_t i = 0; i < seats.size(); ++i) {
+        if (seats[i].championId <= 0) continue;
+        const ChampInfo* c = g->dd.championByKey(seats[i].championId);
+        if (c) out[i] = {c->id, seats[i].state};
+    }
+    return out;
+}
+
+// The view model the Desktop draws: one entry per seat, empty ones included.
+json seatsJson(const std::array<DraftPick, 5>& seats) {
+    json arr = json::array();
+    for (auto& s : seats)
+        arr.push_back(json{{"champion", s.champion},
+                           {"state", s.state == PickState::Locked  ? "locked"
+                                     : s.state == PickState::Hover ? "hover"
+                                                                   : "empty"}});
+    return arr;
+}
+
 // The draft the Desktop needs to mirror champion select in its own controls.
 // Names, never ids: the UI works with ddragon ids (PRD 14.3, minimal view model).
 json draftView(const ChampSelectView& cs, const DraftContext& ctx) {
     json d;
     d["role"] = ctx.role;
-    d["allies"] = ctx.allyChampions;
-    d["enemies"] = ctx.enemyChampions;
-    d["bans"] = ctx.bans;
+    d["allySeats"] = seatsJson(ctx.allySeats);
+    d["enemySeats"] = seatsJson(ctx.enemySeats);
+    d["localSeat"] = ctx.localSeat;
+    d["bansAllies"] = ctx.allyBans;
+    d["bansEnemies"] = ctx.enemyBans;
+    d["bansUnknown"] = ctx.unknownBans;
     d["pickable"] = ctx.ownedOrPickable;
-    d["locked"] = cs.localChampionId != 0;
-    int mine = cs.localChampionId != 0 ? cs.localChampionId : cs.localHoverChampionId;
+    d["locked"] = cs.localChampionId() != 0;
+    int mine = cs.localChampionId() != 0 ? cs.localChampionId() : cs.localHoverChampionId();
     const ChampInfo* c = mine != 0 ? g->dd.championByKey(mine) : nullptr;
     d["myChampion"] = c ? c->id : "";
     return d;
@@ -120,30 +146,39 @@ void handleChampSelect() {
 
     DraftContext ctx;
     ctx.role = cs->assignedRole;
-    ctx.allyChampions = namesOf(cs->allyChampionIds);
-    ctx.enemyChampions = namesOf(cs->enemyChampionIds);
-    ctx.bans = namesOf(cs->banIds);
+    ctx.allySeats = seatsOf(cs->allySeats);
+    ctx.enemySeats = seatsOf(cs->enemySeats);
+    ctx.localSeat = cs->localSeat;
+    ctx.allyBans = namesOf(cs->allyBanIds);
+    ctx.enemyBans = namesOf(cs->enemyBanIds);
+    ctx.unknownBans = namesOf(cs->unknownBanIds);
     ctx.ownedOrPickable = namesOf(cs->pickableChampionIds);
     ctx.patch = g->dd.version();
 
     // Recompute only when the draft changed (RF-CS-005).
-    std::string sig = ctx.role + "|" + std::to_string(cs->localChampionId) + "|" +
-                      std::to_string(cs->localHoverChampionId);
-    for (auto& c : ctx.allyChampions) sig += "," + c;
-    sig += "|";
-    for (auto& c : ctx.enemyChampions) sig += "," + c;
-    sig += "|";
-    for (auto& c : ctx.bans) sig += "," + c;
+    std::string sig = ctx.role + "|" + std::to_string(cs->localChampionId()) + "|" +
+                      std::to_string(cs->localHoverChampionId());
+    // Sign seat by seat, state included. A hover that becomes a lock is a draft
+    // change even though the champion did not move.
+    for (auto* side : {&ctx.allySeats, &ctx.enemySeats}) {
+        for (auto& s : *side) sig += "," + s.champion + ":" + std::to_string((int)s.state);
+        sig += "|";
+    }
+    // Sign each side apart: a ban that moves from unknown to a side is a draft
+    // change the Desktop must repaint, and a flat list would hide it.
+    for (auto* side : {&ctx.allyBans, &ctx.enemyBans, &ctx.unknownBans}) {
+        for (auto& c : *side) sig += "," + c;
+        sig += "|";
+    }
     if (sig == g->lastDraftSignature) return;
     g->lastDraftSignature = sig;
 
-    if (cs->localChampionId == 0) {
+    if (cs->localChampionId() == 0) {
         // Not locked yet: Top 3.
         Top3 top = recommendTop3(*g->db, g->dd, ctx);
         json contract = makeContract("top3", ctx.patch,
                                      json{{"role", ctx.role},
-                                          {"known_picks", ctx.allyChampions.size() +
-                                                          ctx.enemyChampions.size()}},
+                                          {"known_picks", ctx.knownPicks()}},
                                      json(top), top.cards.empty() ? "baja" : top.cards[0].confidence,
                                      top.uncertaintyReason);
         g->db->saveRecommendation("top3", contract.dump());
@@ -153,7 +188,7 @@ void handleChampSelect() {
         msg["data"] = contract;
         msg["draft"] = draftView(*cs, ctx);
         g->server.broadcast(msg.dump(), "draft");
-    } else if (const ChampInfo* mine = g->dd.championByKey(cs->localChampionId)) {
+    } else if (const ChampInfo* mine = g->dd.championByKey(cs->localChampionId())) {
         // Locked: full pregame plan + quiz.
         PlanInput pi;
         pi.champion = mine->id;
@@ -178,7 +213,7 @@ void handleChampSelect() {
                                " picks; el plan se rehace al cerrarse";
         json contract = makeContract("pregame_plan", ctx.patch,
                                      json{{"champion", pi.champion}, {"role", pi.role},
-                                          {"enemies", ctx.enemyChampions},
+                                          {"enemies", ctx.enemyChampions()},
                                           {"draft_closed", ctx.closed()},
                                           {"known_picks", ctx.knownPicks()}},
                                      payload, items.confidence, uncertainty);

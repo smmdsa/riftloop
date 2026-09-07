@@ -27,8 +27,8 @@ struct Needs {
 };
 
 Needs computeNeeds(const Ddragon& dd, const DraftContext& ctx) {
-    CompTraits ally = dd.teamTraits(ctx.allyChampions);
-    CompTraits enemy = dd.teamTraits(ctx.enemyChampions);
+    CompTraits ally = dd.teamTraits(ctx.allyChampions());
+    CompTraits enemy = dd.teamTraits(ctx.enemyChampions());
     Needs n;
     n.frontline = std::max(0.0, 1.4 - ally.frontline);
     n.engage    = std::max(0.0, 1.0 - ally.engage);
@@ -107,9 +107,10 @@ Top3 recommendTop3(Db& db, const Ddragon& dd, const DraftContext& ctx) {
 
     // Candidate set: the user's pool for the role (RF-CS-003/004).
     std::set<std::string> pickable(ctx.ownedOrPickable.begin(), ctx.ownedOrPickable.end());
-    std::set<std::string> banned(ctx.bans.begin(), ctx.bans.end());
-    for (auto& c : ctx.allyChampions) banned.insert(c);
-    for (auto& c : ctx.enemyChampions) banned.insert(c);
+    std::vector<std::string> bans = ctx.allBans();
+    std::set<std::string> banned(bans.begin(), bans.end());
+    for (auto& c : ctx.allyChampions()) banned.insert(c);
+    for (auto& c : ctx.enemyChampions()) banned.insert(c);
 
     std::vector<Candidate> cands;
     for (auto& e : prof.pool) {
@@ -139,7 +140,7 @@ Top3 recommendTop3(Db& db, const Ddragon& dd, const DraftContext& ctx) {
     for (auto& c : cands)
         c.fit = fitScore(dd, c.entry.champion, needs, &c.fitReasons);
 
-    int knownPicks = (int)(ctx.allyChampions.size() + ctx.enemyChampions.size());
+    int knownPicks = ctx.knownPicks();
     std::string conf = knownPicks >= 6 ? "media" : "baja";
     out.uncertaintyReason = knownPicks < 6
         ? "Draft incompleto: " + std::to_string(knownPicks) + " de 9 picks visibles"

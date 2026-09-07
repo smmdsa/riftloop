@@ -51,7 +51,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(ChampCard, champion, label, reas
                                                 experience, confidence)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Top3, cards, uncertaintyReason, patch, available,
                                                 unavailableReason)
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(RunePage, name, primaryStyle, subStyle, perks, reasons)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(RunePage, name, primaryStyle, subStyle, perks, reasons,
+                                                intent)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(SpellPlan, spells, reason)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(ItemBranch, label, items, condition)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(ItemPlan, starting, firstBack, firstBackGold, core,

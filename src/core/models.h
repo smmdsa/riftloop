@@ -200,18 +200,73 @@ struct CompTraits {                  // PRD 11.3, simplified vector
     double healingShields = 0;       // enemy threat input for items
 };
 
+// One seat of one team in champion select, in cell order. A seat nobody filled
+// keeps its place, so a pick that arrives late never moves the ones already
+// there. Hover is what the client shows before the lock: real, and still able
+// to change, so it never reads as a confirmed pick (PRD 3.3).
+enum class PickState { Empty, Hover, Locked };
+
+struct DraftPick {
+    std::string champion;            // empty while the seat is open
+    PickState   state = PickState::Empty;
+};
+
 struct DraftContext {
     std::string role;                // user assigned role
-    std::vector<std::string> allyChampions;   // known picks (without user)
-    std::vector<std::string> enemyChampions;  // known picks
-    std::vector<std::string> bans;
+    // Five seats per side, in cell order. allySeats holds the user too, at
+    // localSeat. The engines ask allyChampions(), which leaves the user out.
+    std::array<DraftPick, 5> allySeats{};
+    std::array<DraftPick, 5> enemySeats{};
+    int localSeat = -1;              // index into allySeats, -1 = unknown
+    // Bans by side, in draft order. A ban the client did not attribute stays in
+    // unknownBans: the UI must not put it on a side that nobody reported.
+    std::vector<std::string> allyBans;
+    std::vector<std::string> enemyBans;
+    std::vector<std::string> unknownBans;
     std::vector<std::string> ownedOrPickable; // empty = unknown -> use pool
     std::string patch;
 
+    // Every ban, whatever the side. Availability does not care who banned.
+    std::vector<std::string> allBans() const {
+        std::vector<std::string> all = allyBans;
+        all.insert(all.end(), enemyBans.begin(), enemyBans.end());
+        all.insert(all.end(), unknownBans.begin(), unknownBans.end());
+        return all;
+    }
+
+    // Known picks, compact, derived from the seats. There is no second copy to
+    // fall out of step. allyChampions() leaves the user out: the engines ask
+    // what is AROUND the user, not what the user is.
+    std::vector<std::string> allyChampions() const {
+        std::vector<std::string> out;
+        for (int i = 0; i < (int)allySeats.size(); ++i)
+            if (i != localSeat && !allySeats[i].champion.empty())
+                out.push_back(allySeats[i].champion);
+        return out;
+    }
+    std::vector<std::string> enemyChampions() const {
+        std::vector<std::string> out;
+        for (auto& s : enemySeats)
+            if (!s.champion.empty()) out.push_back(s.champion);
+        return out;
+    }
+    // Fills the seats in order, for a draft that has no real cells: the CLI and
+    // the tests. A context built this way has no local seat.
+    void setAllyChampions(const std::vector<std::string>& champs) {
+        allySeats = {};
+        for (size_t i = 0; i < champs.size() && i < allySeats.size(); ++i)
+            allySeats[i] = {champs[i], PickState::Locked};
+    }
+    void setEnemyChampions(const std::vector<std::string>& champs) {
+        enemySeats = {};
+        for (size_t i = 0; i < champs.size() && i < enemySeats.size(); ++i)
+            enemySeats[i] = {champs[i], PickState::Locked};
+    }
+
     // The draft is closed when all ten champions are visible. The user is not
-    // in allyChampions, so four allies plus five enemies is the full board.
-    bool closed() const { return allyChampions.size() >= 4 && enemyChampions.size() >= 5; }
-    int  knownPicks() const { return (int)(allyChampions.size() + enemyChampions.size()); }
+    // in allyChampions(), so four allies plus five enemies is the full board.
+    bool closed() const { return allyChampions().size() >= 4 && enemyChampions().size() >= 5; }
+    int  knownPicks() const { return (int)(allyChampions().size() + enemyChampions().size()); }
     int  missingPicks() const { return 9 - knownPicks() < 0 ? 0 : 9 - knownPicks(); }
 };
 
@@ -237,6 +292,10 @@ struct RunePage {
     int primaryStyle = 0, subStyle = 0;
     std::vector<int> perks;          // 4 primary + 2 sub + 3 shards
     std::vector<std::string> reasons;    // max 3 non-obvious decisions
+    // What the page goes for, in one line. The core writes it; the UI prints
+    // it and never composes it (PRD 12.4). Two pages of one plan must read
+    // differently, or the second one has no reason to exist (RF-RUN-002).
+    std::string intent;
 };
 
 struct RunePlan {

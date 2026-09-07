@@ -71,11 +71,9 @@ enum : int {
     // mission
     IDC_MISSION_VIEW = 1400, IDC_SUGGEST_MISSION, IDC_SKILLS_LIST, IDC_MISSION_REFRESH,
     // draft
-    IDC_DRAFT_ROLE = 1500, IDC_DRAFT_CHAMP, IDC_DRAFT_GO, IDC_DRAFT_PLAN, IDC_DRAFT_QUIZ,
+    IDC_DRAFT_GO = 1500, IDC_DRAFT_PLAN, IDC_DRAFT_QUIZ,
     IDC_DRAFT_VIEW,
-    IDC_DRAFT_ALLY0 = 1520,          // ..1523
-    IDC_DRAFT_ENEMY0 = 1530,         // ..1534
-    IDC_DRAFT_BANS = 1540, IDC_APPLY_RUNES, IDC_UNDO_RUNES,
+    IDC_APPLY_RUNES = 1540, IDC_UNDO_RUNES,
     // patch
     IDC_PATCH_VIEW = 1600, IDC_PATCH_REFRESH,
     // settings
@@ -106,6 +104,9 @@ const wchar_t* kPageSubtitles[kPages] = {
 
 constexpr int kSidebarW = 200;
 constexpr int kWinW = 1560, kWinH = 900;
+// The draft view runs to the bottom edge of the window: the page had 266 px
+// of unused height under it.
+constexpr int kDraftViewH = 700;
 // Right-hand column of the post-match page: player on top, clip cards below.
 constexpr int kClipPanelW = 430;
 const char* kRoles[5] = {"TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"};
@@ -131,7 +132,10 @@ struct App {
 
     // Draft mirrored from the agent. Bans and the pickable set have no combo of
     // their own, so the Draft Lab keeps them here for a manual recompute.
-    std::vector<std::string> draftBans;
+    std::array<DraftPick, 5> draftAllySeats{}, draftEnemySeats{};
+    int draftLocalSeat = -1;
+    std::string draftRole, draftMyChampion;
+    std::vector<std::string> draftAllyBans, draftEnemyBans, draftUnknownBans;
     std::vector<std::string> draftPickable;
 
     // Last rune page shown. Applying writes exactly this, never something
@@ -200,25 +204,6 @@ void fillChampCombo(HWND cb) {
         SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)name.c_str());
     SendMessageW(cb, CB_SETCURSEL, 0, 0);
 }
-void selectChampCombo(int ctlId, const std::string& champId) {
-    HWND cb = ctl(ctlId);
-    if (!cb) return;
-    int sel = 0;                         // index 0 is the empty dash
-    for (size_t i = 0; i < g->champList.size(); ++i)
-        if (g->champList[i].second == champId) { sel = (int)i + 1; break; }
-    SendMessageW(cb, CB_SETCURSEL, sel, 0);
-}
-
-void selectRoleCombo(int ctlId, const std::string& role, bool withNone) {
-    HWND cb = ctl(ctlId);
-    if (!cb) return;
-    for (int i = 0; i < 5; ++i)
-        if (role == kRoles[i]) {
-            SendMessageW(cb, CB_SETCURSEL, withNone ? i + 1 : i, 0);
-            return;
-        }
-}
-
 std::string comboChampId(int ctlId) {
     int sel = (int)SendMessageW(ctl(ctlId), CB_GETCURSEL, 0, 0);
     if (sel <= 0 || sel > (int)g->champList.size()) return {};
@@ -311,9 +296,105 @@ COLORREF confColor(const std::string& conf) {
 
 // ------------------------------------------------------- report view builders
 
+// The draft at a glance: one row of bans, one row of picks, our side facing
+// theirs. It replaces nine dropdowns and a comma-separated list of names.
+//
+// The colour means "your team" and "the enemy team", not the side of the map.
+// The user asked for the real side on 2026-09-07, and the client does not
+// expose it in champion select: TASK-0017 measures whether it can be derived.
+// Until it answers, these two lines are the only thing that has to change.
+constexpr COLORREF kOurSide = theme::kAccent;
+constexpr COLORREF kTheirSide = theme::kDanger;
+
+std::vector<RVSeat> seatsToRv(const std::array<DraftPick, 5>& seats, int userSeat) {
+    std::vector<RVSeat> out;
+    for (int i = 0; i < (int)seats.size(); ++i) {
+        RVSeat s;
+        s.champion = seats[i].champion;
+        s.iconUrl = s.champion.empty() ? "" : champIconUrl(s.champion);
+        s.hover = seats[i].state == PickState::Hover;
+        s.isUser = (i == userSeat);
+        if (s.isUser) s.label = L"tú";
+        else if (s.hover) s.label = L"eligiendo";
+        out.push_back(s);
+    }
+    return out;
+}
+
+std::vector<RVSeat> bansToRv(const std::vector<std::string>& bans) {
+    std::vector<RVSeat> out;
+    for (auto& b : bans) {
+        RVSeat s;
+        s.champion = b;
+        s.iconUrl = champIconUrl(b);
+        s.banned = true;
+        out.push_back(s);
+    }
+    return out;
+}
+
+// Nothing to show yet. The page states who fills it, and asks for nothing:
+// the user has no control here to complete (TASK-0010).
+// A sample draft, for looking at the Draft Lab without queueing for a game.
+// Started with --demo-draft. It is a development flag, not a manual mode: the
+// user never types a champion here.
+void loadDemoDraft() {
+    auto seat = [](const char* id, PickState st) { return DraftPick{id, st}; };
+    g->draftRole = "BOTTOM";
+    g->draftMyChampion = "Jinx";
+    g->draftLocalSeat = 3;
+    g->draftAllySeats = {seat("KSante", PickState::Locked), seat("LeeSin", PickState::Locked),
+                         seat("Ahri", PickState::Hover), seat("Jinx", PickState::Locked),
+                         DraftPick{}};
+    g->draftEnemySeats = {seat("Camille", PickState::Locked), seat("RekSai", PickState::Locked),
+                          DraftPick{}, seat("Caitlyn", PickState::Hover), DraftPick{}};
+    g->draftAllyBans = {"Rell", "MasterYi", "Illaoi", "Zed", "Yasuo"};
+    g->draftEnemyBans = {"Vi", "Sett", "Akali"};
+    g->draftUnknownBans = {"Kaisa"};
+}
+
+std::vector<RVItem> rvDraftIdle() {
+    return {{RVKind::Title, L"Draft Lab"},
+            {RVKind::Text, L"Esta página se rellena sola al entrar en champion select."},
+            {RVKind::Dim, L"Los picks aparecen uno a uno según se eligen, y los baneos con "
+                          L"el equipo que los hizo. No hay nada que completar a mano."}};
+}
+
+void rvAddDraftStrips(std::vector<RVItem>& v) {
+    bool anyPick = g->draftLocalSeat >= 0;
+    for (auto* side : {&g->draftAllySeats, &g->draftEnemySeats})
+        for (auto& s : *side)
+            if (!s.champion.empty()) anyPick = true;
+    bool anyBan = !g->draftAllyBans.empty() || !g->draftEnemyBans.empty() ||
+                  !g->draftUnknownBans.empty();
+    if (!anyPick && !anyBan) return;
+
+    RVItem bans{RVKind::TeamStrip};
+    bans.leftSeats = bansToRv(g->draftAllyBans);
+    bans.rightSeats = bansToRv(g->draftEnemyBans);
+    bans.leftColor = kOurSide;
+    bans.rightColor = kTheirSide;
+    bans.compact = true;
+    bans.text = g->draftUnknownBans.empty()
+                    ? L"BANEOS"
+                    : L"BANEOS · " + std::to_wstring(g->draftUnknownBans.size()) +
+                          L" sin equipo conocido";
+    v.push_back(bans);
+
+    RVItem picks{RVKind::TeamStrip};
+    picks.leftSeats = seatsToRv(g->draftAllySeats, g->draftLocalSeat);
+    picks.rightSeats = seatsToRv(g->draftEnemySeats, -1);
+    picks.leftColor = kOurSide;
+    picks.rightColor = kTheirSide;
+    picks.text = L"PICKS";
+    v.push_back(picks);
+    v.push_back({RVKind::Spacer, L""});
+}
+
 std::vector<RVItem> rvTop3(const Top3& t) {
     std::vector<RVItem> v;
     v.push_back({RVKind::Title, L"Top 3 para esta partida"});
+    rvAddDraftStrips(v);
     if (!t.available) {
         v.push_back({RVKind::Text, w(t.unavailableReason)});
         return v;
@@ -360,6 +441,26 @@ void rvAddPerkRow(std::vector<RVItem>& v, int perkId, const std::wstring& label,
     v.push_back(row);
 }
 
+// One rune page: header, what it goes for, the six perks with icons, the
+// shards and the reasons. Both pages of a plan use it, so the user compares
+// like with like. badge is optional and rides under the header.
+void rvAddRunePage(std::vector<RVItem>& v, const std::wstring& label, const RunePage& p,
+                   const RVItem* badge) {
+    v.push_back({RVKind::Section, label + L" — " + w(g->dd.styleName(p.primaryStyle)) + L" + " +
+                                      w(g->dd.styleName(p.subStyle))});
+    if (badge) v.push_back(*badge);
+    // The core writes this line. The UI never composes it (PRD 12.4).
+    if (!p.intent.empty()) v.push_back({RVKind::Text, w(p.intent)});
+    rvAddPerkRow(v, p.perks[0], L"piedra angular", 0);
+    for (int i = 1; i <= 3; ++i) rvAddPerkRow(v, p.perks[i], L"", 12);
+    rvAddPerkRow(v, p.perks[4], L"secundaria", 12);
+    rvAddPerkRow(v, p.perks[5], L"secundaria", 12);
+    v.push_back({RVKind::Dim, L"Fragmentos: " + w(g->dd.shardName(p.perks[6])) + L" · " +
+                                  w(g->dd.shardName(p.perks[7])) + L" · " +
+                                  w(g->dd.shardName(p.perks[8]))});
+    for (auto& r : p.reasons) v.push_back({RVKind::Dim, L"• " + w(r)});
+}
+
 std::vector<RVItem> rvPlan(const std::string& champ, const std::string& role, const RunePlan& rp,
                            const SpellPlan& sp, const ItemPlan& ip,
                            const std::vector<QuizQuestion>& quiz) {
@@ -369,33 +470,22 @@ std::vector<RVItem> rvPlan(const std::string& champ, const std::string& role, co
     title.iconId = champ;
     title.iconUrl = champIconUrl(champ);
     v.push_back(title);
+    rvAddDraftStrips(v);
 
     if (g->ddOk && rp.main.perks.size() >= 9) {
-        v.push_back({RVKind::Section, L"Runas — " + w(g->dd.styleName(rp.main.primaryStyle)) +
-                                          L" + " + w(g->dd.styleName(rp.main.subStyle))});
         RVItem badge{RVKind::Badge, confBadge(rp.confidence)};
         badge.color = confColor(rp.confidence);
-        v.push_back(badge);
-        rvAddPerkRow(v, rp.main.perks[0], L"piedra angular", 0);
-        for (int i = 1; i <= 3; ++i) rvAddPerkRow(v, rp.main.perks[i], L"", 12);
-        rvAddPerkRow(v, rp.main.perks[4], L"secundaria", 12);
-        rvAddPerkRow(v, rp.main.perks[5], L"secundaria", 12);
-        v.push_back({RVKind::Dim, L"Fragmentos: " + w(g->dd.shardName(rp.main.perks[6])) + L" · " +
-                                      w(g->dd.shardName(rp.main.perks[7])) + L" · " +
-                                      w(g->dd.shardName(rp.main.perks[8]))});
-        for (auto& r : rp.main.reasons) v.push_back({RVKind::Dim, L"• " + w(r)});
+        rvAddRunePage(v, L"Runas", rp.main, &badge);
         // RF-RUN-001: say whether the draft can still change this page.
         v.push_back({RVKind::Dim, rp.draftClosed
             ? std::wstring(L"Plan definitivo: los 10 campeones estan bloqueados")
             : L"Plan provisional: faltan " + std::to_wstring(rp.missingPicks) +
                   L" picks; se rehace al cerrarse el draft"});
-        if (rp.situational && rp.situational->perks.size() >= 6) {
-            v.push_back({RVKind::Dim,
-                         L"Alternativa: " + w(g->dd.styleName(rp.situational->subStyle)) +
-                             L" secundaria con " + w(g->dd.perkName(rp.situational->perks[4])) +
-                             L" + " + w(g->dd.perkName(rp.situational->perks[5]))});
-            for (auto& r : rp.situational->reasons)
-                v.push_back({RVKind::Dim, L"   " + w(r)});
+        // The alternative gets the same shape as the main page. Drawn smaller,
+        // the user cannot compare the two and the choice is not a choice.
+        if (rp.situational && rp.situational->perks.size() >= 9) {
+            v.push_back({RVKind::Spacer, L""});
+            rvAddRunePage(v, L"Alternativa", *rp.situational, nullptr);
         } else if (!rp.noAlternativeReason.empty()) {
             v.push_back({RVKind::Dim, L"Sin alternativa: " + w(rp.noAlternativeReason)});
         }
@@ -967,16 +1057,13 @@ void runFetch() {
 
 DraftContext draftContextFromUi() {
     DraftContext ctx;
-    ctx.role = comboRole(IDC_DRAFT_ROLE, false);
-    for (int i = 0; i < 4; ++i) {
-        std::string id = comboChampId(IDC_DRAFT_ALLY0 + i);
-        if (!id.empty()) ctx.allyChampions.push_back(id);
-    }
-    for (int i = 0; i < 5; ++i) {
-        std::string id = comboChampId(IDC_DRAFT_ENEMY0 + i);
-        if (!id.empty()) ctx.enemyChampions.push_back(id);
-    }
-    ctx.bans = g->draftBans;
+    ctx.role = g->draftRole;
+    ctx.allySeats = g->draftAllySeats;
+    ctx.enemySeats = g->draftEnemySeats;
+    ctx.localSeat = g->draftLocalSeat;
+    ctx.allyBans = g->draftAllyBans;
+    ctx.enemyBans = g->draftEnemyBans;
+    ctx.unknownBans = g->draftUnknownBans;
     // The pickable set is only true while the client is in champion select.
     if (g->agentState == "ChampSelect") ctx.ownedOrPickable = g->draftPickable;
     ctx.patch = g->ddOk ? g->dd.version() : "";
@@ -985,30 +1072,51 @@ DraftContext draftContextFromUi() {
 
 // Mirrors the live champion select into the Draft Lab controls. The user can
 // still edit them; the next draft change overwrites the edit.
+// Reads one side of the draft. A seat keeps its index, so an empty seat stays
+// empty instead of pulling the next champion into its place.
+std::array<DraftPick, 5> seatsFromJson(const json& d, const char* key) {
+    std::array<DraftPick, 5> out{};
+    if (!d.contains(key) || !d[key].is_array()) return out;
+    const json& arr = d[key];
+    for (size_t i = 0; i < arr.size() && i < out.size(); ++i) {
+        std::string state = arr[i].value("state", "empty");
+        out[i].champion = arr[i].value("champion", "");
+        out[i].state = state == "locked"  ? PickState::Locked
+                       : state == "hover" ? PickState::Hover
+                                          : PickState::Empty;
+    }
+    return out;
+}
+
 void applyDraftView(const json& d) {
-    selectRoleCombo(IDC_DRAFT_ROLE, d.value("role", ""), false);
-    selectChampCombo(IDC_DRAFT_CHAMP, d.value("myChampion", ""));
-    auto allies = d.value("allies", std::vector<std::string>{});
-    for (int i = 0; i < 4; ++i)
-        selectChampCombo(IDC_DRAFT_ALLY0 + i, i < (int)allies.size() ? allies[i] : "");
-    auto enemies = d.value("enemies", std::vector<std::string>{});
-    for (int i = 0; i < 5; ++i)
-        selectChampCombo(IDC_DRAFT_ENEMY0 + i, i < (int)enemies.size() ? enemies[i] : "");
+    g->draftRole = d.value("role", "");
+    g->draftMyChampion = d.value("myChampion", "");
+    g->draftAllySeats = seatsFromJson(d, "allySeats");
+    g->draftEnemySeats = seatsFromJson(d, "enemySeats");
+    g->draftLocalSeat = d.value("localSeat", -1);
 
-    g->draftBans = d.value("bans", std::vector<std::string>{});
-    g->draftPickable = d.value("pickable", std::vector<std::string>{});
+    using Names = std::vector<std::string>;
+    g->draftAllyBans = d.value("bansAllies", Names{});
+    g->draftEnemyBans = d.value("bansEnemies", Names{});
+    g->draftUnknownBans = d.value("bansUnknown", Names{});
+    // An agent that still sends the flat "bans" field names no side. Keep the
+    // bans instead of dropping them, and claim no side for them.
+    if (!d.contains("bansAllies") && d.contains("bans"))
+        g->draftUnknownBans = d.value("bans", Names{});
+    g->draftPickable = d.value("pickable", Names{});
 
-    std::string bans;
-    for (auto& b : g->draftBans) bans += (bans.empty() ? "" : ", ") + champDisplay(b);
-    setText(IDC_DRAFT_BANS, bans.empty() ? "Baneos: todavia ninguno"
-                                         : "Baneos (" + std::to_string(g->draftBans.size()) +
-                                               "): " + bans);
 }
 
 void clearDraftView() {
-    g->draftBans.clear();
+    g->draftAllySeats = {};
+    g->draftEnemySeats = {};
+    g->draftLocalSeat = -1;
+    g->draftRole.clear();
+    g->draftMyChampion.clear();
+    g->draftAllyBans.clear();
+    g->draftEnemyBans.clear();
+    g->draftUnknownBans.clear();
     g->draftPickable.clear();
-    setText(IDC_DRAFT_BANS, "Baneos: -");
 }
 
 // Rebuilds the local meta sample: a larger history import, the rune backfill
@@ -1046,7 +1154,7 @@ void draftRecommend() {
 
 void draftPlan() {
     if (!g->ddOk) return;
-    std::string champ = comboChampId(IDC_DRAFT_CHAMP);
+    std::string champ = g->draftMyChampion;
     if (champ.empty()) {
         rvSet(ctl(IDC_DRAFT_VIEW),
               {{RVKind::Title, L"Elige tu campeón"},
@@ -1888,34 +1996,15 @@ void buildPages() {
     addListViewColumns(sl, {{L"Dominio", 140}, {L"Estado", 100}, {L"Confianza", 90}});
 
     // ---- 4: Draft Lab ------------------------------------------------------
-    mk(4, L"STATIC", L"Rol", WS_VISIBLE, X, Y, 60, 20, 0);
-    fillRoleCombo(mk(4, L"COMBOBOX", L"", WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, X, Y + 20,
-                     110, 300, IDC_DRAFT_ROLE), false);
-    mk(4, L"STATIC", L"Tu campeón", WS_VISIBLE, X + 124, Y, 100, 20, 0);
-    mk(4, L"COMBOBOX", L"", WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, X + 124, Y + 20, 170, 380,
-       IDC_DRAFT_CHAMP);
-    mkButton(4, L"Top 3", X + 310, Y + 20, 90, 26, IDC_DRAFT_GO);
-    mkButton(4, L"Plan pregame", X + 408, Y + 20, 120, 26, IDC_DRAFT_PLAN);
-    mkButton(4, L"Probar quiz", X + 536, Y + 20, 110, 26, IDC_DRAFT_QUIZ);
-
-    mk(4, L"STATIC", L"Aliados", WS_VISIBLE, X, Y + 56, 70, 20, 0);
-    for (int i = 0; i < 4; ++i)
-        mk(4, L"COMBOBOX", L"", WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, X + 70 + i * 168,
-           Y + 52, 160, 380, IDC_DRAFT_ALLY0 + i);
-    mk(4, L"STATIC", L"Rivales", WS_VISIBLE, X, Y + 90, 70, 20, 0);
-    for (int i = 0; i < 5; ++i)
-        mk(4, L"COMBOBOX", L"", WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, X + 70 + i * 168,
-           Y + 86, 160, 380, IDC_DRAFT_ENEMY0 + i);
-
-    mk(4, L"STATIC", L"Baneos: -", WS_VISIBLE, X, Y + 122, 600, 22, IDC_DRAFT_BANS);
-    mkButton(4, L"Aplicar runas", X + 616, Y + 116, 150, 28, IDC_APPLY_RUNES);
-    mkButton(4, L"Deshacer", X + 776, Y + 116, 110, 28, IDC_UNDO_RUNES);
-    mkReport(4, X, Y + 150, W, 376, IDC_DRAFT_VIEW);
-    rvSet(ctl(IDC_DRAFT_VIEW),
-          {{RVKind::Title, L"Draft Lab"},
-           {RVKind::Text, L"En champion select esta página se rellena sola desde el Agent."},
-           {RVKind::Dim, L"Sin cliente: elige rol y campeones en los desplegables y pulsa "
-                         L"Top 3 o Plan pregame."}});
+    // No dropdowns here. The champion select fills this page; the user has
+    // nothing to type. The strip of portraits does the reading.
+    mkButton(4, L"Top 3", X, Y, 90, 28, IDC_DRAFT_GO);
+    mkButton(4, L"Plan pregame", X + 98, Y, 120, 28, IDC_DRAFT_PLAN);
+    mkButton(4, L"Probar quiz", X + 226, Y, 110, 28, IDC_DRAFT_QUIZ);
+    mkButton(4, L"Aplicar runas", X + 616, Y, 150, 28, IDC_APPLY_RUNES);
+    mkButton(4, L"Deshacer", X + 776, Y, 110, 28, IDC_UNDO_RUNES);
+    mkReport(4, X, Y + 40, W, kDraftViewH, IDC_DRAFT_VIEW);
+    rvSet(ctl(IDC_DRAFT_VIEW), rvDraftIdle());
 
     // ---- 5: Parche ---------------------------------------------------------
     mkReport(5, X, Y, W, 480, IDC_PATCH_VIEW);
@@ -2390,11 +2479,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     buildPages();
     if (app.ddOk) {
         fillChampCombo(ctl(IDC_POOL_CHAMP));
-        fillChampCombo(ctl(IDC_DRAFT_CHAMP));
-        for (int i = 0; i < 4; ++i) fillChampCombo(ctl(IDC_DRAFT_ALLY0 + i));
-        for (int i = 0; i < 5; ++i) fillChampCombo(ctl(IDC_DRAFT_ENEMY0 + i));
     }
-    switchPage(0);
+    if (std::wstring(GetCommandLineW()).find(L"--demo-draft") != std::wstring::npos) {
+        loadDemoDraft();
+        rvSet(ctl(IDC_DRAFT_VIEW), rvTop3(recommendTop3(*app.db, app.dd, draftContextFromUi())));
+        switchPage(4);
+    } else {
+        switchPage(0);
+    }
     ShowWindow(app.hwnd, SW_SHOW);
 
     app.client = std::make_unique<ipc::Client>(onIpc);

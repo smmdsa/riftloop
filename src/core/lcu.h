@@ -16,14 +16,41 @@ struct LcuConnection {
     std::string password;
 };
 
+struct ChampSelectSeat {
+    int       championId = 0;            // 0 = nobody picked or hovered yet
+    PickState state = PickState::Empty;
+};
+
 struct ChampSelectView {
     std::string assignedRole;            // TOP/JUNGLE/MIDDLE/BOTTOM/UTILITY
-    int         localChampionId = 0;     // 0 = not locked
-    int         localHoverChampionId = 0;  // pick intent before the lock
-    std::vector<int> allyChampionIds;    // locked pick or hover, excluding local player
-    std::vector<int> enemyChampionIds;
-    std::vector<int> banIds;             // completed bans, both teams, in draft order
+    // Five seats per side, sorted by cell id. The index of a player never
+    // changes during the draft, so a late pick does not move the others.
+    std::array<ChampSelectSeat, 5> allySeats{};
+    std::array<ChampSelectSeat, 5> enemySeats{};
+    int localSeat = -1;                  // index into allySeats, -1 = unknown
+    // Completed bans, in draft order inside each side. The client attributes a
+    // ban by its summary lists or by the actor cell of the action; when it does
+    // neither, the ban lands in unknownBanIds and no side claims it.
+    std::vector<int> allyBanIds;
+    std::vector<int> enemyBanIds;
+    std::vector<int> unknownBanIds;
     std::vector<int> pickableChampionIds;
+
+    // Every ban, whatever the side. Availability does not care who banned.
+    std::vector<int> allBanIds() const;
+
+    // The user's champion, derived from the seat. Locked returns the pick;
+    // hover returns 0, because a hover is not a pick.
+    int localChampionId() const {
+        return localSeat >= 0 && allySeats[localSeat].state == PickState::Locked
+                   ? allySeats[localSeat].championId
+                   : 0;
+    }
+    int localHoverChampionId() const {
+        return localSeat >= 0 && allySeats[localSeat].state == PickState::Hover
+                   ? allySeats[localSeat].championId
+                   : 0;
+    }
 };
 
 // Pure parser for the LCU champ select payloads. The session shape is the one

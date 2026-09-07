@@ -217,6 +217,7 @@ int itemHeight(const RVItem& it) {
         case RVKind::Badge:   return 30;
         case RVKind::Spacer:  return 12;
         case RVKind::ClipCard: return 84;
+        case RVKind::TeamStrip: return it.compact ? 50 : 78;
     }
     return 22;
 }
@@ -361,6 +362,99 @@ void rvPaint(HWND hwnd, RVData* d) {
                     RECT sr{textX, card.top + 32, card.right - 10, card.bottom - 6};
                     DrawTextW(dc, it.subtitle.c_str(), -1, &sr,
                               DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS | DT_EDITCONTROL);
+                    break;
+                }
+                case RVKind::TeamStrip: {
+                    // Two rows of portraits facing each other, with the row name
+                    // in the middle. A seat with no champion keeps its box, so
+                    // the row never shifts when a late pick arrives.
+                    // Picks decide the game; bans are context. Size says so.
+                    const int kPortrait = it.compact ? 40 : 52;
+                    const int kGap = it.compact ? 6 : 8, kTop = it.compact ? 2 : 4;
+                    auto drawSeats = [&](const std::vector<RVSeat>& seats, int originX,
+                                         COLORREF accent, bool rightToLeft) {
+                        for (size_t i = 0; i < seats.size(); ++i) {
+                            const RVSeat& s = seats[i];
+                            int step = (int)i * (kPortrait + kGap);
+                            int sx = rightToLeft ? originX - step - kPortrait : originX + step;
+                            int sy = y + kTop;
+                            RECT box{sx, sy, sx + kPortrait, sy + kPortrait};
+
+                            HBITMAP bmp = s.champion.empty()
+                                              ? nullptr
+                                              : icons::get("champ", s.champion, s.iconUrl);
+                            if (bmp) {
+                                drawBitmap(dc, bmp, sx, sy, kPortrait);
+                                // A ban is the same portrait, spent: dimmed and
+                                // crossed. It must not read as a pick.
+                                if (s.banned) {
+                                    HDC mem = CreateCompatibleDC(dc);
+                                    HBITMAP veil = CreateCompatibleBitmap(dc, kPortrait,
+                                                                          kPortrait);
+                                    HGDIOBJ ob = SelectObject(mem, veil);
+                                    RECT vr{0, 0, kPortrait, kPortrait};
+                                    FillRect(mem, &vr, theme::cardBrush());
+                                    // A ban must stay recognisable: the veil says "spent",
+                                    // it does not hide who it is.
+                                    BLENDFUNCTION bf{AC_SRC_OVER, 0, 55, 0};
+                                    AlphaBlend(dc, sx, sy, kPortrait, kPortrait, mem, 0, 0,
+                                               kPortrait, kPortrait, bf);
+                                    SelectObject(mem, ob);
+                                    DeleteObject(veil);
+                                    DeleteDC(mem);
+                                    HPEN sl = CreatePen(PS_SOLID, 2, theme::kDanger);
+                                    HGDIOBJ op = SelectObject(dc, sl);
+                                    MoveToEx(dc, sx + 2, sy + kPortrait - 2, nullptr);
+                                    LineTo(dc, sx + kPortrait - 2, sy + 2);
+                                    SelectObject(dc, op);
+                                    DeleteObject(sl);
+                                }
+                            } else {
+                                // Reserved, still open. A dotted box holds the
+                                // place so nothing jumps when the pick lands.
+                                HPEN pen = CreatePen(PS_DOT, 1, theme::kBorder);
+                                HGDIOBJ op = SelectObject(dc, pen);
+                                HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
+                                Rectangle(dc, box.left, box.top, box.right, box.bottom);
+                                SelectObject(dc, ob);
+                                SelectObject(dc, op);
+                                DeleteObject(pen);
+                            }
+
+                            // Team colour frames every filled seat. The user's
+                            // own champion gets a thicker frame in kGood.
+                            if (!s.champion.empty()) {
+                                COLORREF edge = s.isUser ? theme::kGood : accent;
+                                int width = s.isUser ? 3 : 1;
+                                HPEN pen = CreatePen(s.hover ? PS_DOT : PS_SOLID, width, edge);
+                                HGDIOBJ op = SelectObject(dc, pen);
+                                HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
+                                Rectangle(dc, box.left, box.top, box.right, box.bottom);
+                                SelectObject(dc, ob);
+                                SelectObject(dc, op);
+                                DeleteObject(pen);
+                            }
+
+                            if (!s.label.empty()) {
+                                SelectObject(dc, theme::tiny());
+                                SetTextColor(dc, theme::kDim);
+                                RECT lr{sx - 4, sy + kPortrait + 1, sx + kPortrait + 4,
+                                        sy + kPortrait + 16};
+                                DrawTextW(dc, s.label.c_str(), -1, &lr,
+                                          DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                            }
+                        }
+                    };
+                    drawSeats(it.leftSeats, x, it.leftColor ? it.leftColor : theme::kAccent, false);
+                    drawSeats(it.rightSeats, W - 16, it.rightColor ? it.rightColor : theme::kDanger,
+                              true);
+                    if (!it.text.empty()) {
+                        SelectObject(dc, theme::tiny());
+                        SetTextColor(dc, theme::kDim);
+                        RECT mr{x, y + kTop + 14, W - 16, y + kTop + 32};
+                        DrawTextW(dc, it.text.c_str(), -1, &mr,
+                                  DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                    }
                     break;
                 }
                 case RVKind::Badge: {

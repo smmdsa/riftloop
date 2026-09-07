@@ -51,6 +51,14 @@ static int g_checks = 0;
         }                                                                            \
     } while (0)
 
+// Index that never leaves the vector. A vector shorter than the test expects
+// must print its FAIL line. A raw v[i] past the end aborts the process in the
+// MSVC debug runtime, and stdout dies with it, so the report says nothing.
+template <class T>
+static T at(const std::vector<T>& v, size_t i) {
+    return i < v.size() ? v[i] : T{};
+}
+
 // ------------------------------------------------------------------ fixtures
 
 static const char* kMyPuuid = "me-puuid";
@@ -298,9 +306,9 @@ int main() {
         // --- recommend ------------------------------------------------------
         DraftContext ctx;
         ctx.role = "MIDDLE";
-        ctx.allyChampions = {"Garen", "LeeSin", "Jinx", "Thresh"};
-        ctx.enemyChampions = {"Aatrox", "Soraka", "Zed", "Caitlyn", "Leona"};
-        ctx.bans = {"Orianna"};
+        ctx.setAllyChampions({"Garen", "LeeSin", "Jinx", "Thresh"});
+        ctx.setEnemyChampions({"Aatrox", "Soraka", "Zed", "Caitlyn", "Leona"});
+        ctx.enemyBans = {"Orianna"};
         Top3 top = recommendTop3(db, dd, ctx);
         CHECK(top.available);
         CHECK((int)top.cards.size() >= 1 && (int)top.cards.size() <= 3);
@@ -391,10 +399,15 @@ int main() {
                     pv.champion = champ;
                     pv.role = role;
                     pv.draft.role = role;
-                    pv.draft.enemyChampions = cs.enemies;
+                    pv.draft.setEnemyChampions(cs.enemies);
                     RunePlan rv = planRunes(db, dd, pv);
                     checkSelectable(rv.main, cs.label);
                     if (rv.situational) checkSelectable(*rv.situational, cs.label);
+                    // No champion, role or comp may produce a page with no
+                    // intent line, and the two pages never read alike.
+                    CHECK(!rv.main.intent.empty());
+                    if (rv.situational)
+                        CHECK(rv.situational->intent != rv.main.intent);
                 }
             }
         }
@@ -427,11 +440,33 @@ int main() {
             for (int i = 0; i < 6; ++i) CHECK(dd.runeExists(rp.situational->perks[i]));
         }
 
+        // --- TASK-0011: every page says what it goes for ---------------------
+        // A page with no intent line leaves the user choosing between two sets
+        // of icons. Two pages that say the same thing are the same choice
+        // twice, and RF-RUN-002 forbids an alternative that only adds variety.
+        CHECK(!rp.main.intent.empty());
+        CHECK(rp.main.intent.size() <= 90);
+        if (rp.situational) {
+            CHECK(!rp.situational->intent.empty());
+            CHECK(rp.situational->intent.size() <= 90);
+            CHECK(rp.situational->intent != rp.main.intent);
+        }
+        // The intent is a core value, so it must survive the trip to the UI
+        // and to the audit record.
+        {
+            json wire = rp;
+            RunePlan back = wire.get<RunePlan>();
+            CHECK_EQ(back.main.intent, rp.main.intent);
+            CHECK_EQ(back.situational.has_value(), rp.situational.has_value());
+            if (back.situational && rp.situational)
+                CHECK_EQ(back.situational->intent, rp.situational->intent);
+        }
+
         // The matchup outranks the sample on the secondary slots, and the
         // stated reason must match the perks that ended up on the page
         // (a page saying "tenacity" without the tenacity perk is a lie).
         PlanInput pcc = pi;
-        pcc.draft.enemyChampions = {"Leona", "Thresh", "Sejuani", "Morgana", "Ashe"};
+        pcc.draft.setEnemyChampions({"Leona", "Thresh", "Sejuani", "Morgana", "Ashe"});
         RunePlan rcc = planRunes(db, dd, pcc);
         bool claimsTenacity = false;
         for (auto& r : rcc.main.reasons)
@@ -443,8 +478,8 @@ int main() {
         // An open draft never claims to be closed and never promises an
         // alternative it cannot decide yet.
         PlanInput po = pi;
-        po.draft.enemyChampions.pop_back();
-        po.draft.allyChampions.pop_back();
+        po.draft.enemySeats[4] = {};
+        po.draft.allySeats[3] = {};
         RunePlan ro = planRunes(db, dd, po);
         CHECK(!ro.draftClosed);
         CHECK_EQ(ro.missingPicks, 2);
@@ -1020,8 +1055,8 @@ int main() {
         });
         cs["bans"] = json{{"myTeamBans", json::array({266})}, {"theirTeamBans", json::array()}};
         cs["actions"] = json::array({json::array({
-            json{{"type", "ban"}, {"championId", 266}, {"completed", true}},
-            json{{"type", "ban"}, {"championId", 84}, {"completed", true}},
+            json{{"type", "ban"}, {"championId", 266}, {"completed", true}, {"actorCellId", 0}},
+            json{{"type", "ban"}, {"championId", 84}, {"completed", true}, {"actorCellId", 5}},
             json{{"type", "ban"}, {"championId", 99}, {"completed", false}},       // still hovering
             json{{"type", "pick"}, {"championId", 412}, {"completed", true}},
         })});
@@ -1029,25 +1064,141 @@ int main() {
         auto v = parseChampSelect(cs.dump(), "[1,2,3]");
         CHECK(v.has_value());
         CHECK_EQ(v->assignedRole, std::string("BOTTOM"));      // lowercase -> match-v5 casing
-        CHECK_EQ(v->localChampionId, 0);                       // not locked
-        CHECK_EQ(v->localHoverChampionId, 103);
-        CHECK_EQ((int)v->allyChampionIds.size(), 2);
-        CHECK_EQ(v->allyChampionIds[0], 64);                   // ally hover counts as a pick
-        CHECK_EQ(v->allyChampionIds[1], 412);
-        CHECK_EQ((int)v->enemyChampionIds.size(), 1);          // the empty cell is skipped
-        CHECK_EQ(v->enemyChampionIds[0], 157);
-        CHECK_EQ((int)v->banIds.size(), 2);                    // 266 not duplicated, 99 not done
-        CHECK_EQ(v->banIds[0], 266);
-        CHECK_EQ(v->banIds[1], 84);
+        CHECK_EQ(v->localChampionId(), 0);                     // hovering, not locked
+        CHECK_EQ(v->localHoverChampionId(), 103);
+        // --- TASK-0016: one seat per cell, empty seats keep their place ------
+        CHECK_EQ(v->localSeat, 2);
+        CHECK_EQ(v->allySeats[0].championId, 64);              // cell 0 hovers
+        CHECK(v->allySeats[0].state == PickState::Hover);
+        CHECK_EQ(v->allySeats[1].championId, 412);             // cell 1 locked
+        CHECK(v->allySeats[1].state == PickState::Locked);
+        CHECK_EQ(v->allySeats[2].championId, 103);             // cell 2 is the user
+        CHECK(v->allySeats[2].state == PickState::Hover);
+        CHECK_EQ(v->allySeats[3].championId, 0);               // nobody there yet
+        CHECK(v->allySeats[3].state == PickState::Empty);
+        CHECK_EQ(v->enemySeats[0].championId, 157);
+        CHECK(v->enemySeats[0].state == PickState::Locked);
+        CHECK_EQ(v->enemySeats[1].championId, 0);              // the empty cell keeps its seat
+        CHECK(v->enemySeats[1].state == PickState::Empty);
+        // 266 is banned by our side, 84 by theirs, 99 is not completed. Each
+        // ban lands on one side only: 266 comes from the summary AND from an
+        // action, and it must not show up twice (TASK-0009).
+        CHECK_EQ((int)v->allyBanIds.size(), 1);
+        CHECK_EQ(at(v->allyBanIds, 0), 266);
+        CHECK_EQ((int)v->enemyBanIds.size(), 1);
+        CHECK_EQ(at(v->enemyBanIds, 0), 84);
+        CHECK(v->unknownBanIds.empty());
+        CHECK_EQ((int)v->allBanIds().size(), 2);
         CHECK_EQ((int)v->pickableChampionIds.size(), 3);
 
-        // Bans only in the summary lists still parse.
+        // Bans only in the summary lists still parse, and keep their side.
         json late = cs;
         late.erase("actions");
         auto v2 = parseChampSelect(late.dump(), "");
         CHECK(v2.has_value());
-        CHECK_EQ((int)v2->banIds.size(), 1);
+        CHECK_EQ((int)v2->allyBanIds.size(), 1);
+        CHECK(v2->enemyBanIds.empty());
+        CHECK(v2->unknownBanIds.empty());
         CHECK(v2->pickableChampionIds.empty());
+
+        // Actions without an actor cell name no side. The ban is kept, and no
+        // side claims it: the client did not say whose it is.
+        json anon = cs;
+        anon.erase("bans");
+        anon["actions"] = json::array({json::array({
+            json{{"type", "ban"}, {"championId", 266}, {"completed", true}},
+            json{{"type", "ban"}, {"championId", 84}, {"completed", true}, {"actorCellId", 5}},
+        })});
+        auto v3 = parseChampSelect(anon.dump(), "");
+        CHECK(v3.has_value());
+        CHECK(v3->allyBanIds.empty());
+        CHECK_EQ((int)v3->enemyBanIds.size(), 1);              // cell 5 is theirTeam
+        CHECK_EQ((int)v3->unknownBanIds.size(), 1);
+        CHECK_EQ(at(v3->unknownBanIds, 0), 266);
+        CHECK_EQ((int)v3->allBanIds().size(), 2);
+
+        // Three bans on our side and two on theirs stay 3 and 2, not 5.
+        json full = cs;
+        full["bans"] = json{{"myTeamBans", json::array({266, 84, 55})},
+                            {"theirTeamBans", json::array({7, 91})}};
+        full.erase("actions");
+        auto v4 = parseChampSelect(full.dump(), "");
+        CHECK(v4.has_value());
+        CHECK_EQ((int)v4->allyBanIds.size(), 3);
+        CHECK_EQ((int)v4->enemyBanIds.size(), 2);
+        CHECK(v4->unknownBanIds.empty());
+        CHECK_EQ((int)v4->allBanIds().size(), 5);
+        CHECK_EQ(at(v4->allyBanIds, 2), 55);                   // draft order kept per side
+        CHECK_EQ(at(v4->enemyBanIds, 1), 91);
+
+        // The side survives the trip into the draft context, and availability
+        // still sees every ban.
+        DraftContext dctx;
+        dctx.allyBans = {"Aatrox", "Camille", "Swain"};
+        dctx.enemyBans = {"Jhin", "Ahri"};
+        dctx.unknownBans = {"Zed"};
+        CHECK_EQ((int)dctx.allBans().size(), 6);
+        CHECK_EQ(at(dctx.allBans(), 0), std::string("Aatrox"));
+        CHECK_EQ(at(dctx.allBans(), 5), std::string("Zed"));
+
+        // --- TASK-0016: a late pick never moves the ones already there -------
+        // The bug this guards: the old parser compacted the list, so a player
+        // who locked later entered BEFORE one who locked first, and the
+        // portraits on screen jumped sideways.
+        {
+            json early;
+            early["localPlayerCellId"] = 0;
+            early["myTeam"] = json::array({
+                json{{"cellId", 0}, {"championId", 103}},          // the user, locked
+                json{{"cellId", 1}, {"championId", 0}},            // still deciding
+                json{{"cellId", 2}, {"championId", 0}},            // still deciding
+                json{{"cellId", 3}, {"championId", 412}},          // locked early
+                json{{"cellId", 4}, {"championId", 0}},
+            });
+            auto a = parseChampSelect(early.dump(), "");
+            CHECK(a.has_value());
+            CHECK_EQ(a->allySeats[3].championId, 412);
+            CHECK_EQ(a->allySeats[1].championId, 0);
+
+            // Now cell 1 locks. Cell 3 must not move.
+            json late = early;
+            late["myTeam"][1]["championId"] = 64;
+            auto b = parseChampSelect(late.dump(), "");
+            CHECK(b.has_value());
+            CHECK_EQ(b->allySeats[3].championId, 412);         // did NOT move
+            CHECK_EQ(b->allySeats[1].championId, 64);
+            CHECK_EQ(b->localSeat, 0);
+
+            // The client is free to list the team in any order: the seat comes
+            // from the cell, not from the position in the array.
+            json shuffled = late;
+            std::swap(shuffled["myTeam"][0], shuffled["myTeam"][3]);
+            auto c = parseChampSelect(shuffled.dump(), "");
+            CHECK(c.has_value());
+            CHECK_EQ(c->allySeats[3].championId, 412);
+            CHECK_EQ(c->allySeats[0].championId, 103);
+            CHECK_EQ(c->localSeat, 0);
+        }
+
+        // A draft context counts the same picks as before, user excluded.
+        {
+            DraftContext dc;
+            dc.allySeats[0] = {"Ahri", PickState::Locked};        // the user
+            dc.localSeat = 0;
+            dc.allySeats[2] = {"Garen", PickState::Locked};
+            dc.allySeats[3] = {"Jinx", PickState::Hover};
+            for (int i = 0; i < 5; ++i)
+                dc.enemySeats[i] = {"Zed", PickState::Locked};
+            CHECK_EQ((int)dc.allyChampions().size(), 2);         // the user is not in it
+            CHECK_EQ(at(dc.allyChampions(), 0), std::string("Garen"));
+            CHECK_EQ((int)dc.enemyChampions().size(), 5);
+            CHECK_EQ(dc.knownPicks(), 7);
+            CHECK(!dc.closed());                                 // two allies short
+            dc.allySeats[1] = {"Thresh", PickState::Locked};
+            dc.allySeats[4] = {"LeeSin", PickState::Locked};
+            CHECK(dc.closed());
+            CHECK_EQ(dc.missingPicks(), 0);
+        }
 
         CHECK(!parseChampSelect("", "").has_value());
         CHECK(!parseChampSelect("not json", "").has_value());
