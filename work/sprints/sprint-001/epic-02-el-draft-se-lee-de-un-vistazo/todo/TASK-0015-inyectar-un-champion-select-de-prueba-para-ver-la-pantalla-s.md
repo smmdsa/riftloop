@@ -55,6 +55,21 @@ partida. Sin un volcado en champion select no se puede afirmar que ese dato exis
 5. Marcar el draft como de prueba en el propio mensaje, y que el Desktop lo diga en
    pantalla. Un draft falso que parece real es peor que no tenerlo.
 
+## Media tarea ya hecha, 2026-09-07
+
+Al implementar TASK-0010 no habia forma de mirar la pantalla sin entrar en una cola, y
+entregar un dibujo sin verlo no es entregar. Se anadio el atajo mas corto:
+`RiftLoop.Desktop.exe --demo-draft` carga un draft de ejemplo empotrado y abre el Draft Lab
+(`src/desktop/desktop_main.cpp`, `loadDemoDraft`). Con el se capturaron las pruebas de la
+tira de retratos.
+
+No es lo que pide esta tarea, y por eso la tarea sigue abierta. Lo que falta:
+
+- el ejemplo vive en el codigo, no en `tests/fixtures/`;
+- no pasa por el pipe de IPC, asi que no prueba la tuberia del agente al Desktop;
+- la pantalla no dice que ese draft es de prueba, que es el paso 5;
+- no existe `--dump-champselect`, que es lo que TASK-0017 necesita.
+
 ## Done when
 
 - Con el Desktop abierto y sin League en champion select, `--fake-draft` deja la pagina

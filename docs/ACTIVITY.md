@@ -17,9 +17,11 @@ States: `active` · `paused` · `blocked` · `closed` (then move the row to the 
 
 | front | owner | state | touched | next step |
 |---|---|---|---|---|
-| Performance harness (PRD 15) | agent | active | 2026-09-05 (2026-09-05-1356) | TASK-0001: muestrear working set y CPU. Sin empezar |
-| Harness instalado en el repo | agent | active | 2026-09-05 (2026-09-05-1839) | en 0.2.0, atado al upstream sin push. Tras cada upgrade hay que limpiar settings.json a mano (CLAUDE.md) |
-| Sincronia de clips con el reloj de partida | user | blocked | 2026-09-04 (5f0bd8c) | TASK-0005: hace falta una partida grabada entera con el binario nuevo |
+| Performance harness (PRD 15) | agent | active | 2026-09-06 (62d893d) | TASK-0001 sin empezar. El usuario leyo menos de 10 MB a ojo, pero `tasklist` dio 30, 40 y 39 MB: hace falta el medidor |
+| Harness instalado en el repo | agent | active | 2026-09-06 (14abf59) | al dia con el upstream, indice propio en 8510 a 8512. TASK-0007 ya lleva seis defectos sin reportar |
+| Sincronia de clips con el reloj de partida | user | active | 2026-09-06 (1e26669) | tres clips cortados y verificados a 1 s de error con el offset a mano. Falta grabar una partida con el binario nuevo y ver que Capture escribe el offset solo |
+| El draft se lee de un vistazo (EP-02) | agent | active | 2026-09-07 (9dbdc4f) | fuera los nueve desplegables, la tira de retratos dibuja picks y baneos por equipo. TASK-0010 y TASK-0011 esperan el ojo del usuario; el color no significa el lado del mapa hasta que TASK-0017 lo mida |
+| La partida se ve entera (EP-03) | agent | active | 2026-09-07 (b7cf92f) | epica escrita, cero tareas empezadas. Medido: 67 partidas con 5890 eventos y coordenadas en todos, y el parser las tira. Empieza por TASK-0018 y TASK-0019 |
 | Muestra local de runas e items | agent | paused | 2026-09-04 (a3d6751) | el filtro por matchup no se activa: 7 a 11 filas por campeon, falta volumen |
 | Escritura de runas al cliente | agent | paused | 2026-09-04 (771502d) | verificada en los cuatro caminos; apagada por defecto |
 | Top 3 sin champion pool | agent | paused | 2026-09-04 (sesion) | hoy se calla; deberia proponer campeones del draft marcados fuera de pool |
