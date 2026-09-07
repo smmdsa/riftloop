@@ -63,3 +63,18 @@ empezar, como ahora, y actualizar `game_start_offset_sec` en cuanto el evento ap
 
 Nota aparte: la negativa a cortar se muestra en la etiqueta de estado, no en un dialogo.
 Para el usuario el boton "no hace nada". El mensaje esta, pero no se ve.
+
+## Al cierre del 2026-09-06: la cuenta esta probada, el automatismo no
+
+Con el offset escrito a mano (56,5 s, el punto medio de la banda que deja el reloj al
+truncar) la cadena entera funciona: `--autoclip LA2_1622009391` corto tres clips, y el
+fotograma del segundo 15 del primero marca 06:07 contra los 6:08 de la evidencia. Un
+segundo de error, por debajo de los dos que pide el criterio de arriba.
+
+Asi que la aritmetica de `videoPositionSec` es correcta y el margen de 15 s cae donde
+debe. Lo que sigue sin probarse es el paso 2 de esta tarea: que Capture escriba ese
+numero solo. El arreglo esta en `5fc8e14` pero necesita una partida entera con el
+binario nuevo. Hasta entonces, esta tarea no cierra.
+
+El segundo criterio, el del ojo, tambien sigue abierto: el usuario no ha visto los
+clips en el post-match todavia.
