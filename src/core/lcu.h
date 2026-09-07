@@ -64,6 +64,26 @@ struct LcuSummoner {
     std::string riotId;              // gameName#tagLine
 };
 
+// The official rank of the logged-in player. Tier and division only: PRD 7
+// forbids any score equivalent to an alternate MMR, so nothing is derived.
+struct LcuRank {
+    std::string tier;                // "BRONZE", "" when unranked
+    std::string division;            // "II"; empty in the apex tiers
+    int         leaguePoints = 0;
+    int         wins = 0;
+    int         losses = 0;
+    std::string queue = "RANKED_SOLO_5x5";
+    std::string readAtIso;           // when the client answered, UTC
+
+    bool ranked() const { return !tier.empty(); }
+    // "BRONZE II · 34 LP · 164V 186D"
+    std::string display() const;
+};
+
+// Pure parser for /lol-ranked/v1/current-ranked-stats. Exposed for tests.
+std::optional<LcuRank> parseRankedStats(const std::string& json,
+                                        const std::string& queue = "RANKED_SOLO_5x5");
+
 class Lcu {
 public:
     // Locates the lockfile: explicit path from config, then default installs,
@@ -81,6 +101,10 @@ public:
     std::optional<LcuSummoner> currentSummoner();
     // Client locale, e.g. "es_AR"; "" on error.
     std::string clientLocale();
+
+    // Official rank of the logged-in player, straight from the client and with
+    // no Riot API key. Empty when League is closed or the queue is unranked.
+    std::optional<LcuRank> currentRank(const std::string& queue = "RANKED_SOLO_5x5");
 
     // Match history of the logged-in player, straight from the client
     // (no Riot API key). Read-only, no SLA (PRD 13.1).

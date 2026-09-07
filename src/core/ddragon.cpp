@@ -310,6 +310,21 @@ std::string Ddragon::perkIconUrl(int perkOrStyleId) const {
     return "https://ddragon.leagueoflegends.com/cdn/img/" + it->second;
 }
 
+std::string Ddragon::spellIconUrlByKey(int key) const {
+    // summoners_ maps the ddragon id to the key. A match payload carries the
+    // key, so the lookup runs the other way here.
+    for (const auto& [id, k] : summoners_)
+        if (k == key)
+            return "https://ddragon.leagueoflegends.com/cdn/" + version_ + "/img/spell/" +
+                   id + ".png";
+    return {};
+}
+
+std::string Ddragon::mapIconUrl(int mapId) const {
+    return "https://ddragon.leagueoflegends.com/cdn/" + version_ + "/img/map/map" +
+           std::to_string(mapId) + ".png";
+}
+
 std::string Ddragon::spellIconUrl(const std::string& simpleName) const {
     static const std::map<std::string, std::string> kMap = {
         {"Flash", "SummonerFlash"},   {"Teleport", "SummonerTeleport"},

@@ -4,18 +4,20 @@
 #pragma once
 #include "core/ddragon.h"
 #include "core/models.h"
+#include "core/rofl.h"
 
 #include <vector>
 
 namespace rl {
-
-inline constexpr const char* kRulesetVersion = "rules-0.1.0";
 
 struct DetectorInput {
     const MatchSummary& match;
     const Timeline&     timeline;
     int                 userId = 0;  // participantId of the local player
     const Ddragon*      dd = nullptr;    // optional (D09 needs it)
+    // Plain metadata of the .rofl, when the replay is still on disk. Optional:
+    // the client deletes old replays, and every rule here works without it.
+    const RoflStats*    rofl = nullptr;
 };
 
 // Runs every detector. Returns only findings with at least one opportunity.

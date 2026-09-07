@@ -259,6 +259,45 @@ std::optional<LcuSummoner> Lcu::currentSummoner() {
     }
 }
 
+std::string LcuRank::display() const {
+    if (!ranked()) return "Sin clasificar";
+    std::string out = tier;
+    if (!division.empty()) out += " " + division;
+    out += " · " + std::to_string(leaguePoints) + " LP";
+    if (wins + losses > 0)
+        out += " · " + std::to_string(wins) + "V " + std::to_string(losses) + "D";
+    return out;
+}
+
+std::optional<LcuRank> parseRankedStats(const std::string& body, const std::string& queue) {
+    if (body.empty()) return std::nullopt;
+    try {
+        json j = json::parse(body);
+        if (!j.contains("queueMap")) return std::nullopt;
+        const json& map = j["queueMap"];
+        if (!map.contains(queue)) return std::nullopt;
+        const json& q = map[queue];
+        LcuRank r;
+        r.queue = queue;
+        r.tier = q.value("tier", "");
+        // The client answers "NA" or "" for a queue the player never placed in.
+        if (r.tier == "NA" || r.tier == "NONE") r.tier.clear();
+        r.division = q.value("division", "");
+        if (r.division == "NA") r.division.clear();
+        r.leaguePoints = q.value("leaguePoints", 0);
+        r.wins = q.value("wins", 0);
+        r.losses = q.value("losses", 0);
+        r.readAtIso = util::nowIso();
+        return r;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<LcuRank> Lcu::currentRank(const std::string& queue) {
+    return parseRankedStats(get("/lol-ranked/v1/current-ranked-stats"), queue);
+}
+
 std::string Lcu::clientLocale() {
     std::string body = get("/riotclient/region-locale");
     if (body.empty()) return {};

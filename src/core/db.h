@@ -12,6 +12,8 @@ struct sqlite3;
 
 namespace rl {
 
+struct RivalRank;
+
 struct MatchRow {
     std::string matchId;
     std::string patch;
@@ -120,6 +122,13 @@ public:
     std::string lastRecommendation(const std::string& type);
     void    audit(const std::string& type, const std::string& detailJson);
     std::vector<std::string> auditLog(int limit = 100);
+
+    // Official rank of the players of one match already played (TASK-0025).
+    // Keyed by (matchId, participantId): no puuid and no name is stored, so a
+    // row says what someone was ranked in that game and never who they are
+    // (PRD 16, 29).
+    void    upsertMatchRank(const std::string& matchId, const RivalRank& r);
+    std::vector<RivalRank> matchRanks(const std::string& matchId);
 
     // kv store (data versions, cached state)
     void    setKv(const std::string& key, const std::string& value);

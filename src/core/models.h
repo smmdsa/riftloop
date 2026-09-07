@@ -9,6 +9,11 @@
 
 namespace rl {
 
+// The version of the deterministic rule set. Every stored observation carries
+// it, so an analysis is never compared against one produced by other rules
+// (PRD 13.2). 0.2.0 adds D11, which reads the replay metadata.
+inline constexpr const char* kRulesetVersion = "rules-0.2.0";
+
 // ---------------------------------------------------------------- match data
 
 struct Participant {
@@ -57,7 +62,7 @@ struct MatchSummary {
 
 enum class TLType {
     ChampionKill, ItemPurchased, ItemSold, ItemUndo,
-    WardPlaced, EliteMonsterKill, BuildingKill, Other
+    WardPlaced, WardKill, EliteMonsterKill, BuildingKill, Other
 };
 
 struct TLEvent {
@@ -73,13 +78,29 @@ struct TLEvent {
     int         posX = -1, posY = -1;
 };
 
+// A point on the Rift. (0,0) is the bottom-left corner and a real position, so
+// a frame without a position holds no entry at all instead of a zero.
+struct TLPos {
+    int x = 0;
+    int y = 0;
+};
+
 struct TLFrame {
     int64_t tsMs = 0;
     // participantId -> value
     std::map<int, int> totalGold;
     std::map<int, int> currentGold;
-    std::map<int, int> cs;           // minions + jungle
+    std::map<int, int> laneCs;       // minionsKilled: lane minions only
+    std::map<int, int> jungleCs;     // jungleMinionsKilled: camps only
     std::map<int, int> level;
+    std::map<int, int> xp;
+    // Only the participants the source gives a position for. Ask with count().
+    std::map<int, TLPos> pos;
+
+    int cs(int pid) const {          // the two counts added, for lists
+        auto l = laneCs.find(pid), j = jungleCs.find(pid);
+        return (l != laneCs.end() ? l->second : 0) + (j != jungleCs.end() ? j->second : 0);
+    }
 };
 
 struct Timeline {

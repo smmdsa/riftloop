@@ -1,4 +1,5 @@
 #include "core/db.h"
+#include "core/rivalrank.h"
 #include "core/ingest.h"
 #include "core/serial.h"
 #include "core/util.h"
@@ -109,6 +110,14 @@ CREATE TABLE IF NOT EXISTS builds(
   perks TEXT, items TEXT, spells TEXT,
   PRIMARY KEY(match_id, participant_id));
 CREATE INDEX IF NOT EXISTS builds_lookup ON builds(champion, role, patch);
+-- Rank of the ten players of a match already played. It is keyed by the
+-- participant slot of that match, never by an account: no puuid, no name and
+-- no summoner id is kept (PRD 16, 29). An empty tier means "read, and this
+-- player has no rank in this queue".
+CREATE TABLE IF NOT EXISTS match_ranks(
+  match_id TEXT NOT NULL, participant_id INTEGER NOT NULL,
+  tier TEXT, division TEXT, league_points INTEGER, read_at_epoch INTEGER,
+  PRIMARY KEY(match_id, participant_id));
 )sql");
 
     // Additive columns for databases created before they existed. ALTER TABLE
@@ -520,6 +529,34 @@ std::vector<std::string> Db::auditLog(int limit) {
 
 // ------------------------------------------------------------------------ kv
 
+void Db::upsertMatchRank(const std::string& matchId, const RivalRank& r) {
+    Stmt s(db_, "INSERT INTO match_ranks(match_id,participant_id,tier,division,"
+                "league_points,read_at_epoch) VALUES(?1,?2,?3,?4,?5,?6) "
+                "ON CONFLICT(match_id,participant_id) DO UPDATE SET "
+                "tier=excluded.tier, division=excluded.division, "
+                "league_points=excluded.league_points, read_at_epoch=excluded.read_at_epoch");
+    s.bind(1, matchId).bind(2, r.participantId).bind(3, r.tier).bind(4, r.division)
+     .bind(5, r.leaguePoints).bind(6, (int64_t)r.readAtEpoch);
+    s.run();
+}
+
+std::vector<RivalRank> Db::matchRanks(const std::string& matchId) {
+    std::vector<RivalRank> out;
+    Stmt s(db_, "SELECT participant_id,tier,division,league_points,read_at_epoch "
+                "FROM match_ranks WHERE match_id=?1 ORDER BY participant_id");
+    s.bind(1, matchId);
+    while (s.step()) {
+        RivalRank r;
+        r.participantId = s.i32(0);
+        r.tier = s.text(1);
+        r.division = s.text(2);
+        r.leaguePoints = s.i32(3);
+        r.readAtEpoch = s.i64(4);
+        out.push_back(std::move(r));
+    }
+    return out;
+}
+
 void Db::setKv(const std::string& key, const std::string& value) {
     Stmt s(db_, "INSERT INTO kv(key,value) VALUES(?1,?2) "
                 "ON CONFLICT(key) DO UPDATE SET value=?2");
@@ -533,9 +570,12 @@ std::string Db::getKv(const std::string& key) {
 }
 
 void Db::wipeAll() {
+    // Every table, with no exception. "builds" and "match_ranks" were the two
+    // that a partial list would leave behind, and match_ranks holds the rank of
+    // other people (PRD 16.4: the wipe is total or it is not a wipe).
     for (const char* t : {"profile", "matches", "analysis", "feedback", "missions",
                           "opportunities", "skills", "activity", "xp",
-                          "recommendations", "audit", "kv"})
+                          "recommendations", "audit", "kv", "builds", "match_ranks"})
         exec(std::string("DELETE FROM ") + t);
 }
 

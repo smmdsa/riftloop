@@ -58,7 +58,8 @@ void drawBitmap(HDC dc, HBITMAP bmp, int x, int y, int size);
 
 // ------------------------------------------------------------- report view
 // Item kinds for the ReportView control.
-enum class RVKind { Title, Section, Text, Dim, IconRow, Badge, Spacer, ClipCard, TeamStrip };
+enum class RVKind { Title, Section, Text, Dim, IconRow, Badge, Spacer, ClipCard, TeamStrip,
+                    PlayerRow };
 
 // One champion in a draft strip. An empty seat keeps its place, so a pick that
 // lands late never moves the ones already drawn.
@@ -69,6 +70,15 @@ struct RVSeat {
     bool         hover = false;      // picked but not locked: it can still change
     bool         isUser = false;     // the user's own champion
     std::wstring label;              // role or position, under the portrait
+};
+
+// One small icon inside a PlayerRow: an item, a rune or a summoner spell.
+// An empty id draws the empty slot, so six items always take six slots and
+// the columns of ten players line up.
+struct RVChip {
+    std::string kind;                // "item" | "perk" | "spell"
+    std::string id;
+    std::string url;
 };
 
 struct RVItem {
@@ -92,6 +102,12 @@ struct RVItem {
     std::vector<RVSeat> leftSeats, rightSeats;
     COLORREF     leftColor = 0, rightColor = 0;
     bool         compact = false;    // smaller portraits: the bans row
+    // PlayerRow only: one scoreboard line. text names the player, and the
+    // three columns below hold what that player did with the game.
+    std::wstring kda;                // "7 / 1 / 5"
+    std::wstring farm;               // "169 CS · 11.7k oro"
+    std::vector<RVChip> chips;       // spells, then runes, then the six items
+    int          chipGap = 0;        // index where a wider gap is drawn
 };
 
 // wParam = item index, lParam = the view HWND.

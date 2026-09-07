@@ -4,6 +4,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include <initializer_list>
+
 using nlohmann::json;
 
 namespace rl {
@@ -16,9 +18,20 @@ TLType eventType(const std::string& t) {
     if (t == "ITEM_SOLD")         return TLType::ItemSold;
     if (t == "ITEM_UNDO")         return TLType::ItemUndo;
     if (t == "WARD_PLACED")       return TLType::WardPlaced;
+    if (t == "WARD_KILL")         return TLType::WardKill;
     if (t == "ELITE_MONSTER_KILL") return TLType::EliteMonsterKill;
     if (t == "BUILDING_KILL")     return TLType::BuildingKill;
     return TLType::Other;
+}
+
+// The client fills every key of the event union, so an absent-key default is
+// not enough. The first key with a value other than zero wins.
+int firstNonZero(const json& e, std::initializer_list<const char*> keys) {
+    for (const char* k : keys) {
+        int v = e.value(k, 0);
+        if (v != 0) return v;
+    }
+    return 0;
 }
 
 std::string riotHost(const std::string& routing) {
@@ -115,8 +128,17 @@ std::optional<Timeline> parseTimeline(const std::string& jsonText, const std::st
                     int pid = std::stoi(pidStr);
                     fr.totalGold[pid]   = pf.value("totalGold", 0);
                     fr.currentGold[pid] = pf.value("currentGold", 0);
-                    fr.cs[pid] = pf.value("minionsKilled", 0) + pf.value("jungleMinionsKilled", 0);
-                    fr.level[pid] = pf.value("level", 0);
+                    fr.laneCs[pid]      = pf.value("minionsKilled", 0);
+                    fr.jungleCs[pid]    = pf.value("jungleMinionsKilled", 0);
+                    fr.level[pid]       = pf.value("level", 0);
+                    fr.xp[pid]          = pf.value("xp", 0);
+                    // A source with no position leaves the map empty. Zero is a
+                    // real corner of the Rift and never means "unknown".
+                    if (pf.contains("position") && pf["position"].is_object()) {
+                        const auto& pos = pf["position"];
+                        if (pos.contains("x") && pos.contains("y"))
+                            fr.pos[pid] = TLPos{ pos.value("x", 0), pos.value("y", 0) };
+                    }
                 }
             }
             for (auto& e : f.value("events", json::array())) {
@@ -124,13 +146,17 @@ std::optional<Timeline> parseTimeline(const std::string& jsonText, const std::st
                 ev.type = eventType(e.value("type", ""));
                 if (ev.type == TLType::Other) continue;
                 ev.tsMs = e.value("timestamp", (int64_t)0);
-                ev.participantId = e.value("participantId",
-                                   e.value("killerId", e.value("creatorId", 0)));
+                // The client emits every field of the union, so a CHAMPION_KILL
+                // carries "participantId": 0 next to the real "killerId". A
+                // default only fires on an absent key, so the fallback chain
+                // never ran and every kill lost its actor. Participants are 1
+                // to 10, so zero means "this field does not apply here".
+                ev.participantId = firstNonZero(e, { "participantId", "killerId", "creatorId" });
                 ev.victimId = e.value("victimId", 0);
                 for (auto& a : e.value("assistingParticipantIds", json::array()))
                     ev.assistIds.push_back(a);
                 ev.itemId       = e.value("itemId", 0);
-                ev.killerTeamId = e.value("killerTeamId", e.value("teamId", 0));
+                ev.killerTeamId = firstNonZero(e, { "killerTeamId", "teamId" });
                 ev.monsterType  = e.value("monsterType", "");
                 ev.buildingType = e.value("buildingType", "");
                 if (e.contains("position")) {

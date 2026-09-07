@@ -1,4 +1,5 @@
 #include "core/analysis.h"
+#include "core/rofl.h"
 #include "core/detectors.h"
 #include "core/ingest.h"
 #include "core/missions.h"
@@ -6,6 +7,8 @@
 
 #include <algorithm>
 #include <map>
+
+namespace fs = std::filesystem;
 
 namespace rl {
 
@@ -73,7 +76,14 @@ std::optional<AnalysisResult> analyzeMatch(Db& db, const Ddragon* dd, const std:
     if (!me) return std::nullopt;
     db.updateMatchUser(matchId, me->championName, me->position, me->win);
 
-    DetectorInput in{*match, *tl, me->participantId, dd};
+    // The replay adds fields match-v5 never gives (D11). It is optional: the
+    // client deletes old .rofl files, and every other rule works without it.
+    // Only the head and the tail of the file are read (core/rofl.cpp).
+    RoflStats rofl;
+    if (fs::path replay = roflPathForMatch(matchId); !replay.empty())
+        rofl = readRoflFile(replay, puuid);
+
+    DetectorInput in{*match, *tl, me->participantId, dd, rofl.ok ? &rofl : nullptr};
     AnalysisResult res;
     res.matchId = matchId;
     res.rulesetVersion = kRulesetVersion;

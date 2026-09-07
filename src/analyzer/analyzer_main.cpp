@@ -4,6 +4,9 @@
 #include "core/config.h"
 #include "core/db.h"
 #include "core/ddragon.h"
+#include "core/fixture.h"
+#include "core/curves.h"
+#include "core/heatmap.h"
 #include "core/ingest.h"
 #include "core/lcu.h"
 #include "core/lcu_history.h"
@@ -11,6 +14,9 @@
 #include "core/meta.h"
 #include "core/perkpages.h"
 #include "core/replays.h"
+#include "core/rank.h"
+#include "core/rivalrank.h"
+#include "core/rofl.h"
 #include "core/clipmaker.h"
 #include "core/videoframe.h"
 #include "core/videocut.h"
@@ -38,6 +44,11 @@ void usage() {
     std::printf(
         "\n"
         "  --ingest <archivo.json>...   Importa partidas (match-v5 o {match,timeline})\n"
+        "  --export-fixture <id|last> <arch>  Saca una partida anonimizada para tests\n"
+        "  --heatmap [N] [ROL]          Muertes y asesinatos de las N ultimas partidas\n"
+        "  --curves <id|last>           Oro, CS y xp por minuto contra tu mediana de rol\n"
+        "  --rofl-stats <id|last>       Metricas del replay que match-v5 no da\n"
+        "  --ranks <id|last> [refresh]  Rango de los diez de una partida ya jugada\n"
         "  --fetch-lcu [N]              Descarga N partidas desde el cliente de League\n"
         "  --fetch [N]                  Via Riot API (opcional, necesita API key)\n"
         "  --meta [N]                   Refresca la muestra local de builds y runas\n"
@@ -167,6 +178,15 @@ int fetchMatches(Db& db, int count) {
 }
 
 void report(Db& db) {
+    // The rank leads: it is the context every other number sits in.
+    Lcu rankLcu;
+    rankLcu.connect(Config::load().leagueLockfilePath);
+    RankView rank = currentRankView(db, rankLcu.connected() ? &rankLcu : nullptr);
+    if (rank.known)
+        std::printf("Rango: %s  (%s)\n\n", rank.rank.display().c_str(), rank.note.c_str());
+    else
+        std::printf("Rango: %s\n\n", rank.note.c_str());
+
     auto rows = db.listMatches(5);
     std::printf("Partidas almacenadas (ultimas %zu):\n", rows.size());
     for (auto& r : rows)
@@ -350,6 +370,241 @@ int autoClip(Db& db, const std::string& matchId) {
     return res.ok ? 0 : 1;
 }
 
+// Writes one stored match as an anonymous fixture. The scrub runs inside
+// anonymizeFixture (core/fixture.cpp) while the text is built, so no file on
+// disk ever holds a name (PRD 16, 29).
+int exportFixture(Db& db, const std::string& idArg, const std::string& outPath) {
+    std::string matchId = idArg;
+    if (matchId == "last") {
+        auto rows = db.listMatches(1);
+        if (rows.empty()) {
+            std::printf("No hay partidas importadas. Ejecuta --fetch-lcu primero.\n");
+            return 1;
+        }
+        matchId = rows[0].matchId;
+    }
+    fs::path out = fs::path(outPath);
+    // The fixture carries the file name as its match id. The real one resolves
+    // to identities through the Riot API, so it never reaches the repository.
+    std::string stem = out.stem().string();
+    for (auto& ch : stem) ch = (char)std::toupper((unsigned char)ch);
+
+    auto fx = anonymizeFixture(db.matchJson(matchId), db.timelineJson(matchId),
+                               resolveUserPuuid(db), stem);
+    if (!fx.ok) {
+        std::printf("error: %s\n", fx.error.c_str());
+        return 1;
+    }
+    std::error_code ec;
+    if (out.has_parent_path()) fs::create_directories(out.parent_path(), ec);
+    if (!util::writeFile(out, fx.text)) {
+        std::printf("error: no se pudo escribir %s. Comprueba la ruta y los permisos.\n",
+                    out.string().c_str());
+        return 1;
+    }
+    std::printf("%s -> %s (id %s)\n", matchId.c_str(), out.string().c_str(), stem.c_str());
+    std::printf("  %d participantes, %d frames, %d eventos\n",
+                fx.participants, fx.frames, fx.events);
+    std::printf("  posiciones: %d en participantFrames, %d en eventos\n",
+                fx.framesWithPosition, fx.eventsWithPosition);
+    std::printf("  Revisa el archivo antes de commitearlo.\n");
+    return 0;
+}
+
+// Prints the heat map as text. The drawing lives in the Desktop, but the
+// numbers and the orientation must be checkable without opening a window.
+int heatmapReport(Db& db, int matches, const std::string& role) {
+    HeatQuery q;
+    q.matches = matches;
+    q.role = role;
+    HeatMap h = collectHeat(db, q);
+    if (!h.note.empty()) {
+        std::printf("%s\n", h.note.c_str());
+        return 1;
+    }
+    std::printf("%d partidas leidas, %d saltadas%s\n", h.matchesRead, h.matchesSkipped,
+                role.empty() ? "" : (" (rol " + role + ")").c_str());
+    std::printf("  muertes      %4d  (antes del 14: %d, despues: %d)\n",
+                h.count(HeatKind::Death), h.count(HeatKind::Death, true),
+                h.count(HeatKind::Death, false));
+    std::printf("  asesinatos   %4d  (antes del 14: %d, despues: %d)\n",
+                h.count(HeatKind::Kill), h.count(HeatKind::Kill, true),
+                h.count(HeatKind::Kill, false));
+    std::printf("  asistencias  %4d  (antes del 14: %d, despues: %d)\n",
+                h.count(HeatKind::Assist), h.count(HeatKind::Assist, true),
+                h.count(HeatKind::Assist, false));
+
+    // 24x24 text map. Row 0 prints the top of the Rift, so the Y axis flips
+    // here exactly as it must flip on the canvas.
+    const int kCells = 24;
+    std::vector<int> grid(kCells * kCells, 0);
+    for (auto& pt : h.points) {
+        if (pt.kind != HeatKind::Death) continue;
+        int cx = pt.x * kCells / (kRiftMax + 1);
+        int cy = pt.y * kCells / (kRiftMax + 1);
+        cx = std::min(std::max(cx, 0), kCells - 1);
+        cy = std::min(std::max(cy, 0), kCells - 1);
+        ++grid[(kCells - 1 - cy) * kCells + cx];
+    }
+    std::printf("\nmuertes sobre la Grieta (arriba = norte, izquierda = base azul):\n");
+    for (int row = 0; row < kCells; ++row) {
+        std::printf("  ");
+        for (int col = 0; col < kCells; ++col) {
+            int n = grid[row * kCells + col];
+            char c = n == 0 ? '.' : n < 3 ? '-' : n < 8 ? '+' : n < 20 ? '#' : '@';
+            std::printf("%c", c);
+        }
+        std::printf("\n");
+    }
+    return 0;
+}
+
+// Prints the three curves as numbers. The drawing lives in the Desktop; the
+// values must be checkable without opening a window.
+int curvesReport(Db& db, const std::string& idArg) {
+    std::string matchId = idArg;
+    if (matchId == "last") {
+        auto rows = db.listMatches(1);
+        if (rows.empty()) {
+            std::printf("No hay partidas importadas. Ejecuta --fetch-lcu primero.\n");
+            return 1;
+        }
+        matchId = rows[0].matchId;
+    }
+    MatchCurves c = buildCurves(db, matchId);
+    if (!c.ok) {
+        std::printf("%s\n", c.note.c_str());
+        return 1;
+    }
+    std::printf("%s  %s %s  %d min\n", c.matchId.c_str(), c.champion.c_str(), c.role.c_str(),
+                c.durationSec / 60);
+    if (!c.laneChampion.empty()) std::printf("  rival de linea: %s\n", c.laneChampion.c_str());
+    if (!c.note.empty()) std::printf("  aviso: %s\n", c.note.c_str());
+    std::printf("  referencia: %d partidas tuyas en %s\n", c.band[0].samples, c.role.c_str());
+
+    for (int s = 0; s < kSeriesCount; ++s) {
+        std::printf("\n%s  (final %d)\n", seriesName((Series)s), c.user[s].last());
+        std::printf("  min      tu     mediana     rival\n");
+        for (const auto& pt : c.user[s].points) {
+            if (pt.minute % 5 != 0) continue;
+            int med = 0;
+            for (const auto& m : c.band[s].median.points)
+                if (m.minute == pt.minute) med = m.value;
+            int riv = 0;
+            for (const auto& m : c.lane[s].points)
+                if (m.minute == pt.minute) riv = m.value;
+            std::printf("  %3d  %7d   %7d   %7d\n", pt.minute, pt.value, med, riv);
+        }
+    }
+    if (!c.marks.empty()) {
+        std::printf("\nmomentos con evidencia:");
+        for (int64_t ms : c.marks) std::printf(" %s", util::formatGameClock(ms).c_str());
+        std::printf("\n");
+    }
+    return 0;
+}
+
+// Reads the plain metadata of one replay. It never touches the encrypted
+// payload, and it stores nothing: this prints and exits (TASK-0022).
+int roflStats(Db& db, const std::string& idArg) {
+    std::string matchId = idArg;
+    if (matchId == "last") {
+        auto rows = db.listMatches(1);
+        if (rows.empty()) {
+            std::printf("No hay partidas importadas. Ejecuta --fetch-lcu primero.\n");
+            return 1;
+        }
+        matchId = rows[0].matchId;
+    }
+    fs::path file = roflPathForMatch(matchId);
+    if (file.empty()) {
+        std::printf("No hay replay de %s en tu carpeta de Replays. "
+                    "Descargalo desde el historial del cliente.\n", matchId.c_str());
+        return 1;
+    }
+    RoflStats st = readRoflFile(file, resolveUserPuuid(db));
+    if (!st.ok) {
+        std::printf("%s\n", st.error.c_str());
+        return 1;
+    }
+    std::printf("%s\n  version %s · %lld s · %d chunks · %d keyframes\n",
+                file.filename().string().c_str(), st.gameVersion.c_str(),
+                (long long)(st.gameLengthMs / 1000), st.chunks, st.keyFrames);
+
+    const RoflPlayer* me = st.user();
+    if (!me) {
+        std::printf("  No apareces en ese replay, o tu puuid no esta resuelto todavia.\n");
+        return 1;
+    }
+    std::printf("  %s %s equipo %d · %s\n", me->champion.c_str(), me->position.c_str(),
+                me->team, me->win ? "victoria" : "derrota");
+    for (const auto& key : kRoflMetrics()) {
+        auto it = me->metrics.find(key);
+        if (it == me->metrics.end()) continue;
+        std::printf("    %-42s %8d\n", key.c_str(), it->second);
+    }
+    std::printf("\n  %d jugadores leidos. De los otros nueve solo se lee campeon, equipo y "
+                "metricas: ninguna identidad sale del archivo.\n", (int)st.players.size());
+    return 0;
+}
+
+// Rank of the ten players of a match already played. Never champion select:
+// refreshMatchRanks refuses any id that is not a stored match (PRD 17.2).
+int ranksReport(Db& db, const std::string& idArg, bool refresh, bool force, int only) {
+    std::string matchId = idArg;
+    if (matchId == "last") {
+        auto rows = db.listMatches(1);
+        if (rows.empty()) {
+            std::printf("No hay partidas importadas. Ejecuta --fetch-lcu primero.\n");
+            return 1;
+        }
+        matchId = rows[0].matchId;
+    }
+
+    if (refresh) {
+        RiotApiConfig api;
+        api.apiKey = Config::loadApiKey();
+        api.routing = Config::load().routing;
+        auto match = parseMatch(db.matchJson(matchId));
+        int players = match ? (int)match->participants.size() : 10;
+        if (only == 0) {
+            std::printf("Voy a leer el rango de %d jugadores. Son %d llamadas espaciadas "
+                        "para no agotar la cuota: unos %d s.\n",
+                        players, players * 2, estimatedRefreshSeconds(players));
+        }
+        auto res = refreshMatchRanks(db, matchId, api, only, force,
+                                     [](RankFetchProgress p) {
+                                         std::printf("  [%d/%d] %s\n", p.done, p.total,
+                                                     p.label.c_str());
+                                     });
+        std::printf("%s\n\n", res.message.c_str());
+    }
+
+    MatchRankView v = storedMatchRanks(db, matchId);
+    auto match = parseMatch(db.matchJson(matchId));
+    if (!match) {
+        std::printf("%s\n", v.note.c_str());
+        return 1;
+    }
+    std::printf("%s\n", matchId.c_str());
+    for (const auto& p : match->participants) {
+        const RivalRank* r = v.byParticipant(p.participantId);
+        std::printf("  %2d  %-14s %-8s equipo %d  %s\n", p.participantId,
+                    p.championName.c_str(), p.position.c_str(), p.teamId,
+                    r ? r->display().c_str() : "Sin leer");
+    }
+    if (!v.averageTier.empty()) {
+        std::printf("\nPromedio de la partida: %s %s  (%d de 10 con rango, %d sin "
+                    "clasificar, %d sin leer)\n", v.averageTier.c_str(),
+                    v.averageDivision.c_str(), v.known, v.unranked, v.missing);
+    } else {
+        std::printf("\nSin promedio: hacen falta al menos 6 rangos conocidos y hay %d.\n",
+                    v.known);
+    }
+    if (!v.note.empty()) std::printf("%s\n", v.note.c_str());
+    return 0;
+}
+
 int main(int argc, char** argv) {
     SetConsoleOutputCP(CP_UTF8);
     SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);   // PRD 14.2
@@ -388,6 +643,23 @@ int main(int argc, char** argv) {
         if (cmd == "--fetch") {
             int n = args.size() >= 2 ? std::atoi(args[1].c_str()) : Config::load().matchImportCount;
             return fetchMatches(db, n > 0 ? n : 20);
+        }
+        if (cmd == "--export-fixture" && args.size() >= 3) return exportFixture(db, args[1], args[2]);
+        if (cmd == "--curves" && args.size() >= 2) return curvesReport(db, args[1]);
+        if (cmd == "--rofl-stats" && args.size() >= 2) return roflStats(db, args[1]);
+        if (cmd == "--ranks" && args.size() >= 2) {
+            bool refresh = false, force = false;
+            int only = 0;
+            for (size_t i = 2; i < args.size(); ++i) {
+                if (args[i] == "refresh") refresh = true;
+                else if (args[i] == "force") { refresh = true; force = true; }
+                else only = std::atoi(args[i].c_str());
+            }
+            return ranksReport(db, args[1], refresh, force, only);
+        }
+        if (cmd == "--heatmap") {
+            int n = args.size() >= 2 ? std::atoi(args[1].c_str()) : 20;
+            return heatmapReport(db, n > 0 ? n : 20, args.size() >= 3 ? args[2] : "");
         }
 
         // Data Dragon is needed from here on (localized to the client).

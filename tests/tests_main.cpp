@@ -6,17 +6,23 @@
 #include "core/db.h"
 #include "core/ddragon.h"
 #include "core/detectors.h"
+#include "core/fixture.h"
+#include "core/curves.h"
+#include "core/heatmap.h"
 #include "core/ingest.h"
 #include "core/ipc.h"
 #include "core/lcu.h"
 #include "core/meta.h"
 #include "core/perkpages.h"
 #include "core/replays.h"
+#include "core/rivalrank.h"
+#include "core/rofl.h"
 #include "core/videocut.h"
 #include "core/lcu_history.h"
 #include "core/missions.h"
 #include "core/patchimpact.h"
 #include "core/planner.h"
+#include "core/rank.h"
 #include "core/recommend.h"
 #include "core/serial.h"
 #include "core/util.h"
@@ -194,6 +200,11 @@ int main() {
         CHECK_EQ(dd.summonerDisplay("Cleanse"), std::string("Cleanse"));   // SummonerBoost
         CHECK(!dd.shardName(5008).empty());
         CHECK(dd.itemIconUrl(3111).find("/img/item/3111.png") != std::string::npos);
+        // A match payload carries the numeric key, not the ddragon id. Using
+        // the localized name here left every summoner spell slot empty.
+        CHECK(dd.spellIconUrlByKey(4).find("/img/spell/SummonerFlash.png") != std::string::npos);
+        CHECK(dd.spellIconUrlByKey(0).empty());
+        CHECK(dd.spellIconUrlByKey(9999).empty());
         CHECK(dd.perkIconUrl(8112).find("https://") == 0);
         CompTraits enemy = dd.teamTraits({"Aatrox", "Soraka", "Zed", "Caitlyn", "Leona"});
         CHECK(enemy.healingShields >= 2.0);
@@ -1202,6 +1213,844 @@ int main() {
 
         CHECK(!parseChampSelect("", "").has_value());
         CHECK(!parseChampSelect("not json", "").has_value());
+    }
+
+    // --- real fixture: the only one with coordinates (TASK-0018) ------------
+    {
+        std::string raw = util::readFile(RL_FIXTURES_DIR "/sample/real_1.json");
+        CHECK(!raw.empty());
+
+        // No identity survives the export. The scrub runs while the file is
+        // written, so a leak here is a leak in the repository (PRD 16, 29).
+        // The names are enumerated, not blacklisted. A blacklist has to
+        // carry the real name to look for it, and this file is public.
+        CHECK(raw.find("LA2_") == std::string::npos);
+        int nameCount = 0;
+        for (size_t i = raw.find("\"riotIdGameName\""); i != std::string::npos;
+             i = raw.find("\"riotIdGameName\"", i + 1)) {
+            size_t open = raw.find('"', raw.find(':', i) + 1);
+            if (open == std::string::npos) break;
+            size_t close = raw.find('"', open + 1);
+            if (close == std::string::npos) break;
+            std::string v = raw.substr(open + 1, close - open - 1);
+            // Only "Me" and "Player2".."Player10" are allowed in the file.
+            CHECK(v == "Me" || (v.rfind("Player", 0) == 0 && v.size() > 6 &&
+                                v != "Player1" &&
+                                v.find_first_not_of("0123456789", 6) ==
+                                    std::string::npos));
+            ++nameCount;
+        }
+        CHECK(nameCount >= 10);
+        std::vector<std::string> puuids;
+        for (size_t i = raw.find("\"puuid\""); i != std::string::npos; i = raw.find("\"puuid\"", i + 1)) {
+            size_t open = raw.find('"', raw.find(':', i) + 1);
+            if (open == std::string::npos) break;
+            size_t close = raw.find('"', open + 1);
+            if (close == std::string::npos) break;
+            std::string v = raw.substr(open + 1, close - open - 1);
+            // Only "me-puuid" and "p2".."p10" are allowed to be in the file.
+            CHECK(v == "me-puuid" || (v.size() >= 2 && v[0] == 'p' && v != "p1" &&
+                                      v.find_first_not_of("0123456789", 1) == std::string::npos));
+            puuids.push_back(v);
+        }
+        CHECK(puuids.size() >= 10);
+
+        auto pair = splitImport(raw);
+        CHECK(pair.has_value());
+        if (pair) {
+            auto m = parseMatch(pair->matchJson);
+            CHECK(m.has_value());
+            if (m) {
+                CHECK_EQ(m->matchId, std::string("REAL_1"));
+                CHECK_EQ((int)m->participants.size(), 10);
+                CHECK(m->byPuuid("me-puuid") != nullptr);
+            }
+            // The point of this fixture: coordinates. The synthetic ones have
+            // none, so nothing spatial can be tested against them.
+            json realTl = json::parse(pair->timelineJson);
+            int framePos = 0, eventPos = 0;
+            for (auto& f : realTl["info"]["frames"]) {
+                for (auto& [pid, pf] : f["participantFrames"].items()) {
+                    (void)pid;
+                    if (pf.contains("position")) ++framePos;
+                }
+                for (auto& e : f["events"])
+                    if (e.contains("position")) ++eventPos;
+            }
+            CHECK(framePos >= 1);
+            CHECK(eventPos >= 1);
+            CHECK_EQ(framePos, 330);
+            CHECK_EQ(eventPos, 131);
+        }
+    }
+
+    // --- anonymizeFixture: the scrub itself (TASK-0018) ----------------------
+    {
+        json src;
+        src["metadata"]["matchId"] = "LA2_9999";
+        src["metadata"]["participants"] = { "real-aaa", "real-bbb" };
+        json info;
+        info["gameVersion"] = "16.17.702.1234";
+        info["gameDuration"] = 1800;
+        info["queueId"] = 420;
+        for (int i = 0; i < 2; ++i) {
+            json pa;
+            pa["participantId"] = i + 1;
+            pa["puuid"] = i == 0 ? "real-aaa" : "real-bbb";
+            pa["riotIdGameName"] = i == 0 ? "SecretName" : "OtherName";
+            pa["riotIdTagline"] = "SEC";
+            pa["summonerName"] = "LegacyName";
+            pa["summonerId"] = "sum-1234";
+            pa["championName"] = "Ahri";
+            pa["championId"] = 103;
+            pa["teamId"] = 100;
+            pa["teamPosition"] = "MIDDLE";
+            pa["win"] = true;
+            info["participants"].push_back(pa);
+        }
+        src["info"] = info;
+
+        auto fx = anonymizeFixture(src.dump(), "", "real-bbb", "SCRUBBED");
+        CHECK(fx.ok);
+        CHECK_EQ(fx.participants, 2);
+        CHECK(fx.text.find("real-aaa") == std::string::npos);
+        CHECK(fx.text.find("real-bbb") == std::string::npos);
+        CHECK(fx.text.find("SecretName") == std::string::npos);
+        CHECK(fx.text.find("OtherName") == std::string::npos);
+        CHECK(fx.text.find("LegacyName") == std::string::npos);
+        CHECK(fx.text.find("sum-1234") == std::string::npos);
+        CHECK(fx.text.find("LA2_9999") == std::string::npos);
+        CHECK(fx.text.find("SCRUBBED") != std::string::npos);
+        // The user asked for is the one who becomes me-puuid, whatever slot
+        // holds him. Everything that is not an identity stays untouched.
+        auto scrubbed = parseMatch(json::parse(fx.text)["match"].dump());
+        CHECK(scrubbed.has_value());
+        if (scrubbed) {
+            const Participant* me = scrubbed->byPuuid("me-puuid");
+            CHECK(me != nullptr);
+            if (me) {
+                CHECK_EQ(me->participantId, 2);
+                CHECK_EQ(me->championName, std::string("Ahri"));
+            }
+            CHECK(scrubbed->byPuuid("p2") != nullptr);
+        }
+        // A payload with no participants says why, and writes nothing.
+        auto bad = anonymizeFixture("{}", "", "x", "X");
+        CHECK(!bad.ok);
+        CHECK(!bad.error.empty());
+        CHECK(bad.text.empty());
+    }
+
+    // --- the parser keeps position and xp (TASK-0019) ------------------------
+    {
+        std::string raw = util::readFile(RL_FIXTURES_DIR "/sample/real_1.json");
+        auto pair = splitImport(raw);
+        CHECK(pair.has_value());
+        if (pair) {
+            auto realTimeline = parseTimeline(pair->timelineJson, "REAL_1");
+            CHECK(realTimeline.has_value());
+            if (realTimeline) {
+                CHECK_EQ((int)realTimeline->frames.size(), 33);
+                // One frame, read straight off the stored json of a real game.
+                TLFrame f5 = at(realTimeline->frames, 5);
+                CHECK_EQ((int)f5.pos.count(1), 1);
+                if (f5.pos.count(1)) {
+                    CHECK_EQ(f5.pos.at(1).x, 1365);
+                    CHECK_EQ(f5.pos.at(1).y, 10056);
+                }
+                CHECK_EQ(f5.xp.count(1) ? f5.xp.at(1) : 0, 1846);
+                // Lane cs and jungle cs answer different questions, so the
+                // parser keeps them apart instead of adding them at read time.
+                CHECK_EQ(f5.laneCs.count(1) ? f5.laneCs.at(1) : -1, 27);
+                CHECK_EQ(f5.jungleCs.count(1) ? f5.jungleCs.at(1) : -1, 0);
+                CHECK_EQ(f5.cs(1), 27);
+                CHECK_EQ(f5.level.count(1) ? f5.level.at(1) : 0, 5);
+
+                int framesWithPos = 0, eventsWithPos = 0;
+                for (auto& fr : realTimeline->frames) framesWithPos += (int)fr.pos.size();
+                for (auto& ev : realTimeline->events) if (ev.posX >= 0) ++eventsWithPos;
+                CHECK_EQ(framesWithPos, 330);
+                CHECK_EQ(eventsWithPos, 131);
+                CHECK_EQ((int)realTimeline->events.size(), 131);
+            }
+        }
+
+        // A timeline with no position must produce no coordinate at all. (0,0)
+        // is a real corner of the Rift, so a zero there would be a lie.
+        auto plain = parseTimeline(makeTimelineJson().dump(), "DEMO_1");
+        CHECK(plain.has_value());
+        if (plain) {
+            int leaked = 0;
+            for (auto& fr : plain->frames) leaked += (int)fr.pos.size();
+            CHECK_EQ(leaked, 0);
+            CHECK(!plain->frames.empty());
+            if (!plain->frames.empty())
+                CHECK(!plain->frames[0].xp.empty());
+        }
+
+        // WARD_KILL used to fall into Other and get dropped before storage.
+        json wk;
+        json fr;
+        fr["timestamp"] = 60000;
+        fr["participantFrames"] = json::object();
+        json e;
+        e["type"] = "WARD_KILL";
+        e["timestamp"] = 60000;
+        e["killerId"] = 3;
+        e["position"] = { {"x", 100}, {"y", 200} };
+        fr["events"] = json::array({ e });
+        wk["info"]["frames"] = json::array({ fr });
+        auto wt = parseTimeline(wk.dump(), "WK_1");
+        CHECK(wt.has_value());
+        if (wt) {
+            CHECK_EQ((int)wt->events.size(), 1);
+            CHECK(at(wt->events, 0).type == TLType::WardKill);
+            CHECK_EQ(at(wt->events, 0).posX, 100);
+            CHECK_EQ(at(wt->events, 0).posY, 200);
+            CHECK_EQ(at(wt->events, 0).participantId, 3);
+        }
+    }
+
+    // --- heat map aggregation (TASK-0020) -----------------------------------
+    {
+        std::string raw = util::readFile(RL_FIXTURES_DIR "/sample/real_1.json");
+        auto pair = splitImport(raw);
+        CHECK(pair.has_value());
+        if (pair) {
+            auto m = parseMatch(pair->matchJson);
+            auto t = parseTimeline(pair->timelineJson, "REAL_1");
+            CHECK(m.has_value());
+            CHECK(t.has_value());
+            if (m && t) {
+                const Participant* me = m->byPuuid("me-puuid");
+                CHECK(me != nullptr);
+                if (me) {
+                    HeatMap h;
+                    addMatchHeat(*t, me->participantId, h);
+
+                    // Counted straight off the fixture: the user is participant
+                    // 9, and the numbers below come from its CHAMPION_KILL rows.
+                    int deaths = 0, kills = 0, assists = 0;
+                    for (auto& e : t->events) {
+                        if (e.type != TLType::ChampionKill) continue;
+                        if (e.victimId == me->participantId) ++deaths;
+                        else if (e.participantId == me->participantId) ++kills;
+                        else if (std::find(e.assistIds.begin(), e.assistIds.end(),
+                                           me->participantId) != e.assistIds.end()) ++assists;
+                    }
+                    CHECK_EQ(h.count(HeatKind::Death), deaths);
+                    CHECK_EQ(h.count(HeatKind::Kill), kills);
+                    CHECK_EQ(h.count(HeatKind::Assist), assists);
+                    CHECK_EQ((int)h.points.size(), deaths + kills + assists);
+                    // Absolute numbers, counted off the fixture by hand. A
+                    // derived count would agree with a broken parser: the
+                    // client sends "participantId": 0 beside the real
+                    // "killerId", and that once turned every kill into none.
+                    CHECK_EQ(h.count(HeatKind::Death), 7);
+                    CHECK_EQ(h.count(HeatKind::Kill), 4);
+                    CHECK_EQ(h.count(HeatKind::Assist), 12);
+
+                    // Early and late split on minute 14, and they add up.
+                    CHECK_EQ(h.count(HeatKind::Death, true) + h.count(HeatKind::Death, false),
+                             h.count(HeatKind::Death));
+
+                    // Every point sits on the Rift, and none was invented at 0,0
+                    // because a coordinate was missing.
+                    for (auto& pt : h.points) {
+                        CHECK(pt.x >= kRiftMin && pt.x <= kRiftMax);
+                        CHECK(pt.y >= kRiftMin && pt.y <= kRiftMax);
+                        CHECK_EQ(pt.matchId, std::string("REAL_1"));
+                    }
+                }
+            }
+        }
+
+        // The Y axis flips. Without it the blue base lands at the top right
+        // and every reading of the map is backwards.
+        CanvasPoint origin = projectToCanvas(kRiftMin, kRiftMin, 600);
+        CHECK_EQ(origin.x, 0);
+        CHECK_EQ(origin.y, 600);              // bottom left of the canvas
+        CanvasPoint topRight = projectToCanvas(kRiftMax, kRiftMax, 600);
+        CHECK_EQ(topRight.x, 600);
+        CHECK_EQ(topRight.y, 0);                   // top right of the canvas
+        CanvasPoint blueNexus = projectToCanvas(1500, 1500, 600);
+        CHECK(blueNexus.x < 300);
+        CHECK(blueNexus.y > 300);
+        CanvasPoint redNexus = projectToCanvas(13300, 13300, 600);
+        CHECK(redNexus.x > 300);
+        CHECK(redNexus.y < 300);
+        // A coordinate outside the Rift is clamped, never drawn off canvas.
+        CanvasPoint over = projectToCanvas(99999, -50, 600);
+        CHECK_EQ(over.x, 600);
+        CHECK_EQ(over.y, 600);
+
+        // A timeline with no coordinates yields no points at all.
+        auto plain = parseTimeline(makeTimelineJson().dump(), "DEMO_1");
+        CHECK(plain.has_value());
+        if (plain) {
+            HeatMap h;
+            addMatchHeat(*plain, 1, h);
+            CHECK_EQ((int)h.points.size(), 0);
+        }
+
+        // An empty database says why the map is empty. A blank square with no
+        // words is the failure this check exists to stop.
+        {
+            fs::path emptyDb = fs::temp_directory_path() / "riftloop_heat_empty.db";
+            std::error_code rmErr;
+            fs::remove(emptyDb, rmErr);
+            Db db(emptyDb);
+            HeatMap h = collectHeat(db, HeatQuery{});
+            CHECK(h.points.empty());
+            CHECK_EQ(h.matchesRead, 0);
+            CHECK(!h.note.empty());
+        }
+
+        // A participantId of zero means "unknown player". It must classify
+        // nothing rather than claim every kill in the game.
+        if (pair) {
+            auto t = parseTimeline(pair->timelineJson, "REAL_1");
+            if (t) {
+                HeatMap h;
+                addMatchHeat(*t, 0, h);
+                CHECK_EQ((int)h.points.size(), 0);
+            }
+        }
+    }
+
+    // --- gold, cs and xp curves (TASK-0021) ---------------------------------
+    {
+        fs::path curveDb = fs::temp_directory_path() / "riftloop_curves_test.db";
+        std::error_code rmErr;
+        fs::remove(curveDb, rmErr);
+        Db db(curveDb);
+
+        // The profile has to be there before the first import: upsertMatch
+        // stamps the user columns from it, and the band filters on the role.
+        Profile prof = db.loadProfile();
+        prof.puuid = "me-puuid";
+        db.saveProfile(prof);
+
+        std::string raw = util::readFile(RL_FIXTURES_DIR "/sample/real_1.json");
+        auto pair = splitImport(raw);
+        CHECK(pair.has_value());
+        if (pair) {
+            auto m = parseMatch(pair->matchJson);
+            CHECK(m.has_value());
+            if (m) {
+                db.upsertMatch(*m, pair->matchJson, pair->timelineJson);
+
+                MatchCurves c = buildCurves(db, "REAL_1");
+                CHECK(c.ok);
+                CHECK_EQ(c.champion, std::string("Jinx"));
+
+                // The end of the gold curve is the gold of the scoreboard. If
+                // these two ever disagree, one of them is reading the wrong
+                // participant.
+                const Participant* me = m->byPuuid("me-puuid");
+                CHECK(me != nullptr);
+                if (me) {
+                    CHECK_EQ(c.user[(int)Series::Gold].last(), me->goldEarned);
+                    CHECK_EQ(c.user[(int)Series::Gold].last(), 11699);
+                    CHECK_EQ(c.user[(int)Series::Cs].last(), me->totalCs);
+                    CHECK_EQ(c.user[(int)Series::Xp].last(), 14171);
+                }
+                // 33 frames, but the last two share minute 31: one point per minute.
+                CHECK_EQ((int)c.user[(int)Series::Gold].points.size(), 32);
+                CHECK_EQ(at(c.user[(int)Series::Gold].points, 0).minute, 0);
+
+                // One match is not a reference. The view says so and still
+                // draws the curve, instead of a band that means nothing.
+                CHECK_EQ(c.band[0].samples, 0);
+                CHECK(c.band[0].median.points.empty());
+                CHECK(!c.note.empty());
+
+                // Everything is here except a lane opponent: this fixture has
+                // no enemy that shares the position, and the code must leave
+                // the field empty rather than pick someone at random.
+                for (auto& p : m->participants)
+                    if (p.teamId != me->teamId && p.position == me->position)
+                        CHECK(!c.laneChampion.empty());
+            }
+        }
+
+        // Five more copies of the same game under other ids. The median of
+        // identical games is the game itself, so the band must land exactly on
+        // the curve. It also proves the band exists at all: without a sample
+        // the loop below would check nothing and could never turn red.
+        {
+            std::string raw2 = util::readFile(RL_FIXTURES_DIR "/sample/real_1.json");
+            auto p2 = splitImport(raw2);
+            CHECK(p2.has_value());
+            if (p2) {
+                for (int i = 2; i <= 6; ++i) {
+                    std::string id = "REAL_" + std::to_string(i);
+                    json mj = json::parse(p2->matchJson);
+                    json tj = json::parse(p2->timelineJson);
+                    mj["metadata"]["matchId"] = id;
+                    tj["metadata"]["matchId"] = id;
+                    auto copy = parseMatch(mj.dump());
+                    CHECK(copy.has_value());
+                    if (copy) CHECK(db.upsertMatch(*copy, mj.dump(), tj.dump()));
+                }
+
+                MatchCurves c = buildCurves(db, "REAL_1");
+                CHECK(c.ok);
+                CHECK_EQ(c.band[0].samples, 5);
+                CHECK(c.note.empty());
+                for (int sIdx = 0; sIdx < kSeriesCount; ++sIdx) {
+                    CHECK(!c.band[sIdx].median.points.empty());
+                    CHECK_EQ((int)c.band[sIdx].median.points.size(),
+                             (int)c.user[sIdx].points.size());
+                    int prev = 0;
+                    for (size_t k = 0; k < c.band[sIdx].median.points.size(); ++k) {
+                        const CurvePoint& med = c.band[sIdx].median.points[k];
+                        // Never falls: gold, cs and xp only go up, so a dip in
+                        // the median would be an artefact of which games
+                        // reached that minute, not a real loss.
+                        CHECK(med.value >= prev);
+                        prev = med.value;
+                        if (k < c.user[sIdx].points.size())
+                            CHECK_EQ(med.value, c.user[sIdx].points[k].value);
+                    }
+                }
+            }
+        }
+
+        // A match id that is not stored explains itself and draws nothing.
+        MatchCurves missing = buildCurves(db, "NOT_A_MATCH");
+        CHECK(!missing.ok);
+        CHECK(!missing.note.empty());
+    }
+
+    // --- rofl metadata reader (TASK-0022) -----------------------------------
+    {
+        // A minimal replay, built here. A real .rofl weighs 18 MB and names ten
+        // people, so none is committed.
+        auto makeRofl = [](const std::string& statsJson, const std::string& trailing) {
+            std::string bytes = "RIOT";
+            bytes += '\x02';
+            bytes += '\x00';
+            bytes += "16.17.702.1234";
+            bytes += std::string(20, '\x00');       // stand-in for the signature
+            bytes += std::string(64, '\xAA');       // stand-in for the payload
+            json meta;
+            meta["gameLength"] = 1748000;
+            meta["lastGameChunkId"] = 61;
+            meta["lastKeyFrameId"] = 30;
+            meta["statsJson"] = statsJson;
+            bytes += meta.dump();
+            bytes += trailing;                    // the padding a real file has
+            return bytes;
+        };
+        auto player = [](const std::string& puuid, const std::string& name,
+                         const std::string& champ, int team, int wards) {
+            json p;
+            p["PUUID"] = puuid;
+            p["NAME"] = name;
+            p["RIOT_ID_GAME_NAME"] = name;
+            p["RIOT_ID_TAG_LINE"] = "SEC";
+            p["SUMMONER_ID"] = "sum-" + name;
+            p["SKIN"] = champ;
+            p["TEAM"] = team == 100 ? "100" : "200";
+            p["TEAM_POSITION"] = "BOTTOM";
+            p["WIN"] = team == 100 ? "Win" : "Fail";
+            p["WARD_PLACED"] = std::to_string(wards);
+            p["SPELL1_CAST"] = "44";
+            p["TOTAL_TIME_SPENT_DEAD"] = "257";
+            p["VISION_SCORE"] = "17";
+            p["NOT_A_METRIC"] = "hola";           // never stored
+            return p;
+        };
+
+        json stats = json::array();
+        stats.push_back(player("mine-puuid", "Me", "Jinx", 100, 12));
+        stats.push_back(player("other-puuid", "SecretName", "Lux", 200, 30));
+        // Four trailing bytes, exactly what a real replay carries after the
+        // block. A parser that must eat its whole input dies on them.
+        std::string file = makeRofl(stats.dump(), std::string(4, '\xFF'));
+
+        RoflStats st = parseRoflStats(file, "mine-puuid");
+        CHECK(st.ok);
+        CHECK(st.error.empty());
+        CHECK_EQ(st.gameVersion, std::string("16.17.702.1234"));
+        CHECK_EQ((int)(st.gameLengthMs / 1000), 1748);
+        CHECK_EQ(st.chunks, 61);
+        CHECK_EQ(st.keyFrames, 30);
+        CHECK_EQ((int)st.players.size(), 2);
+
+        const RoflPlayer* me = st.user();
+        CHECK(me != nullptr);
+        if (me) {
+            CHECK_EQ(me->champion, std::string("Jinx"));
+            CHECK_EQ(me->team, 100);
+            CHECK(me->win);
+            CHECK_EQ(me->metrics.count("WARD_PLACED") ? me->metrics.at("WARD_PLACED") : -1, 12);
+            CHECK_EQ(me->metrics.count("SPELL1_CAST") ? me->metrics.at("SPELL1_CAST") : -1, 44);
+            CHECK_EQ((int)me->metrics.count("NOT_A_METRIC"), 0);
+            CHECK_EQ((int)me->metrics.count("PUUID"), 0);
+        }
+        // The other nine keep their champion and their numbers, and lose every
+        // trace of who they are (PRD 16, 29).
+        CHECK(!at(st.players, 1).isUser);
+        CHECK_EQ(at(st.players, 1).champion, std::string("Lux"));
+        CHECK_EQ(at(st.players, 1).team, 200);
+
+        // A replay of somebody else's game marks no user, and says nothing
+        // about the nine it does not know.
+        RoflStats notMine = parseRoflStats(file, "someone-else");
+        CHECK(notMine.ok);
+        CHECK(notMine.user() == nullptr);
+
+        // Broken inputs explain themselves and read nothing.
+        RoflStats notRofl = parseRoflStats("this is not a replay at all", "mine-puuid");
+        CHECK(!notRofl.ok);
+        CHECK(!notRofl.error.empty());
+        CHECK(notRofl.players.empty());
+
+        // A header with no block at all. Built byte by byte: a literal with an
+        // embedded NUL would end at the NUL and never reach the header size.
+        std::string headerOnly = "RIOT";
+        headerOnly += '\x02';
+        headerOnly += '\x00';
+        headerOnly += "16.17.702.1234";
+        headerOnly += std::string(200, '\xAA');
+        RoflStats noBlock = parseRoflStats(headerOnly, "mine-puuid");
+        CHECK(!noBlock.ok);
+        CHECK(!noBlock.error.empty());
+
+        // Truncated in the middle of the block: the braces never balance.
+        std::string cut = file.substr(0, file.size() - 400);
+        RoflStats truncated = parseRoflStats(cut, "mine-puuid");
+        CHECK(!truncated.ok);
+        CHECK(!truncated.error.empty());
+
+        RoflStats empty = parseRoflStats("", "mine-puuid");
+        CHECK(!empty.ok);
+
+        // The match id maps to the file name of the replay folder.
+        fs::path fake = fs::temp_directory_path() / "riftloop_replays";
+        std::error_code mkErr;
+        fs::create_directories(fake, mkErr);
+        fs::path target = fake / "LA2-1606112641.rofl";
+        CHECK(util::writeFile(target, file));
+        CHECK_EQ(roflPathForMatch("LA2_1606112641", fake).filename().string(),
+                 std::string("LA2-1606112641.rofl"));
+        CHECK(roflPathForMatch("LA2_9999999999", fake).empty());
+        CHECK(roflPathForMatch("no-underscore", fake).empty());
+
+        RoflStats fromFile = readRoflFile(target, "mine-puuid");
+        CHECK(fromFile.ok);
+        CHECK(fromFile.user() != nullptr);
+        RoflStats missing = readRoflFile(fake / "nope.rofl", "mine-puuid");
+        CHECK(!missing.ok);
+        CHECK(!missing.error.empty());
+    }
+
+    // --- D11: death time against the user's own team (TASK-0023) ------------
+    {
+        // A replay row with only the fields D11 reads.
+        auto row = [](bool isUser, int team, int deadSec, int playedSec) {
+            RoflPlayer p;
+            p.isUser = isUser;
+            p.team = team;
+            p.champion = "Jinx";
+            p.metrics["TOTAL_TIME_SPENT_DEAD"] = deadSec;
+            p.metrics["TIME_PLAYED"] = playedSec;
+            return p;
+        };
+        auto build = [&](int myDead, int teamDead, int playedSec) {
+            RoflStats st;
+            st.ok = true;
+            st.players.push_back(row(true, 100, myDead, playedSec));
+            for (int i = 0; i < 4; ++i) st.players.push_back(row(false, 100, teamDead, playedSec));
+            for (int i = 0; i < 5; ++i) st.players.push_back(row(false, 200, teamDead, playedSec));
+            return st;
+        };
+        auto findD11 = [](const std::vector<Finding>& fs) -> const Finding* {
+            for (const auto& f : fs)
+                if (f.detectorId == "D11") return &f;
+            return nullptr;
+        };
+
+        auto d11Match = parseMatch(matchRaw);
+        auto d11Tl = parseTimeline(tlRaw, "TEST_1");
+        CHECK(d11Match.has_value());
+        CHECK(d11Tl.has_value());
+        if (d11Match && d11Tl) {
+            // 500 s dead of 2000 played is 25 %, and 2.5x the team median.
+            RoflStats bad = build(500, 200, 2000);
+            DetectorInput in{*d11Match, *d11Tl, 1, nullptr, &bad};
+            auto findings = runDetectors(in);
+            const Finding* f = findD11(findings);
+            CHECK(f != nullptr);
+            if (f) {
+                CHECK_EQ(f->opportunities, 1);
+                CHECK_EQ(f->failures, 1);
+                CHECK_EQ((int)f->evidence.size(), 1);
+                if (!f->evidence.empty()) {
+                    const Evidence& ev = f->evidence[0];
+                    // Every field of the contract is filled (PRD 30).
+                    CHECK(!ev.evidenceId.empty());
+                    CHECK(!ev.matchId.empty());
+                    CHECK_EQ(ev.source, std::string("replay"));
+                    CHECK(!ev.observedFacts.empty());
+                    CHECK(!ev.inference.empty());
+                    CHECK_EQ(ev.confidence, std::string("media"));
+                    CHECK(!ev.exclusionsChecked.empty());
+                    CHECK(ev.gameTimestampMs > 0);
+                    // No teammate is named, ever (PRD 9.11).
+                    CHECK(ev.observedFacts.find("Player") == std::string::npos);
+                    CHECK(ev.observedFacts.find("puuid") == std::string::npos);
+                }
+                CHECK(f->title.find("equipo") != std::string::npos);
+            }
+
+            // Same share, but the whole team died as much: no finding fires.
+            RoflStats even = build(500, 480, 2000);
+            DetectorInput inEven{*d11Match, *d11Tl, 1, nullptr, &even};
+            auto evenFindings = runDetectors(inEven);
+            const Finding* fe = findD11(evenFindings);
+            CHECK(fe != nullptr);
+            if (fe) {
+                CHECK_EQ(fe->opportunities, 1);
+                CHECK_EQ(fe->failures, 0);
+                CHECK(fe->evidence.empty());
+            }
+
+            // Far above the team, but only 5 % of the game: not a problem.
+            RoflStats small = build(100, 40, 2000);
+            DetectorInput inSmall{*d11Match, *d11Tl, 1, nullptr, &small};
+            auto smallFindings = runDetectors(inSmall);
+            const Finding* fs2 = findD11(smallFindings);
+            CHECK(fs2 != nullptr);
+            if (fs2) CHECK_EQ(fs2->failures, 0);
+
+            // Under 15 minutes the respawn timer is short: the rule stays out.
+            RoflStats shortGame = build(300, 60, 800);
+            DetectorInput inShort{*d11Match, *d11Tl, 1, nullptr, &shortGame};
+            auto shortFindings = runDetectors(inShort);
+            CHECK(findD11(shortFindings) == nullptr);
+
+            // No replay at all: every other detector still runs.
+            DetectorInput inNone{*d11Match, *d11Tl, 1, nullptr, nullptr};
+            auto without = runDetectors(inNone);
+            CHECK(findD11(without) == nullptr);
+            CHECK(!without.empty());
+
+            // A team with fewer than three measured mates is not a reference.
+            RoflStats thin;
+            thin.ok = true;
+            thin.players.push_back(row(true, 100, 500, 2000));
+            thin.players.push_back(row(false, 100, 100, 2000));
+            DetectorInput inThin{*d11Match, *d11Tl, 1, nullptr, &thin};
+            auto thinFindings = runDetectors(inThin);
+            CHECK(findD11(thinFindings) == nullptr);
+        }
+    }
+
+    // --- own rank, read from the client (TASK-0024) --------------------------
+    {
+        // The shape the client answered on 2026-09-07.
+        json q;
+        q["tier"] = "BRONZE";
+        q["division"] = "II";
+        q["leaguePoints"] = 34;
+        q["wins"] = 164;
+        q["losses"] = 186;
+        json body;
+        body["queueMap"]["RANKED_SOLO_5x5"] = q;
+        body["queueMap"]["RANKED_FLEX_SR"] = json::object();
+
+        auto r = parseRankedStats(body.dump());
+        CHECK(r.has_value());
+        if (r) {
+            CHECK(r->ranked());
+            CHECK_EQ(r->tier, std::string("BRONZE"));
+            CHECK_EQ(r->division, std::string("II"));
+            CHECK_EQ(r->leaguePoints, 34);
+            CHECK_EQ(r->wins, 164);
+            CHECK_EQ(r->losses, 186);
+            CHECK(!r->readAtIso.empty());
+            CHECK(r->display().find("BRONZE II") != std::string::npos);
+            CHECK(r->display().find("34 LP") != std::string::npos);
+            // Nothing is derived from the numbers: no rating, no percentage,
+            // no estimate of any kind (PRD 7).
+            CHECK(r->display().find("MMR") == std::string::npos);
+        }
+
+        // A queue the player never placed in answers "NA", not a tier.
+        json unranked;
+        unranked["queueMap"]["RANKED_SOLO_5x5"]["tier"] = "NA";
+        unranked["queueMap"]["RANKED_SOLO_5x5"]["division"] = "NA";
+        auto ur = parseRankedStats(unranked.dump());
+        CHECK(ur.has_value());
+        if (ur) {
+            CHECK(!ur->ranked());
+            CHECK_EQ(ur->display(), std::string("Sin clasificar"));
+        }
+
+        // A queue that is not in the map, and broken input, give nothing.
+        CHECK(!parseRankedStats(body.dump(), "RANKED_TFT").has_value());
+        CHECK(!parseRankedStats("").has_value());
+        CHECK(!parseRankedStats("not json").has_value());
+        CHECK(!parseRankedStats("{}").has_value());
+
+        // With no client and nothing stored, the view says so and invents no
+        // value. This is the state a first run is in.
+        fs::path rankDb = fs::temp_directory_path() / "riftloop_rank_test.db";
+        std::error_code rmErr;
+        fs::remove(rankDb, rmErr);
+        Db db(rankDb);
+        RankView empty = currentRankView(db, nullptr);
+        CHECK(!empty.known);
+        CHECK(!empty.live);
+        CHECK(!empty.note.empty());
+        CHECK(empty.rank.tier.empty());
+
+        // Once a value is stored, the offline view returns it and dates it.
+        json stored;
+        stored["tier"] = "BRONZE";
+        stored["division"] = "II";
+        stored["leaguePoints"] = 34;
+        stored["wins"] = 164;
+        stored["losses"] = 186;
+        stored["queue"] = "RANKED_SOLO_5x5";
+        stored["readAtIso"] = "2026-09-07T18:00:00Z";
+        db.setKv("rank.solo", stored.dump());
+        RankView offline = currentRankView(db, nullptr);
+        CHECK(offline.known);
+        CHECK(!offline.live);
+        CHECK_EQ(offline.rank.tier, std::string("BRONZE"));
+        CHECK(offline.note.find("2026-09-07T18:00:00Z") != std::string::npos);
+        CHECK(offline.note.find("League cerrado") != std::string::npos);
+    }
+
+    // --- rank of the other nine, history only (TASK-0025) --------------------
+    {
+        CHECK_EQ(platformOfMatch("LA2_1622503726"), std::string("la2"));
+        CHECK_EQ(platformOfMatch("EUW1_123"), std::string("euw1"));
+        CHECK(platformOfMatch("no-underscore").empty());
+        CHECK(platformOfMatch("_leading").empty());
+        // 20 calls, 19 waits of 1300 ms, plus a second of slack.
+        CHECK_EQ(estimatedRefreshSeconds(10, 1300), 25);
+        CHECK_EQ(estimatedRefreshSeconds(1, 1300), 2);
+        CHECK_EQ(estimatedRefreshSeconds(0), 0);
+
+        fs::path rvDb = fs::temp_directory_path() / "riftloop_rivalrank_test.db";
+        std::error_code rmErr;
+        fs::remove(rvDb, rmErr);
+        Db db(rvDb);
+
+        // THE POLICY BARRIER. Champion select has no stored match, so an id
+        // that is not in the matches table is refused before anything else
+        // happens: before the key is read, and before any call goes out
+        // (PRD 17.2 marks scouting a hidden identity as red).
+        RiotApiConfig api;
+        api.apiKey = "RGAPI-would-be-a-real-key";
+        auto blocked = refreshMatchRanks(db, "champ-select-session", api);
+        CHECK(!blocked.ok);
+        CHECK_EQ(blocked.fetched, 0);
+        CHECK(blocked.message.find("champion select") != std::string::npos);
+        // The same barrier holds for the id shapes a live session could carry.
+        for (const char* id : {"", "LA2_0", "0", "current"}) {
+            auto b = refreshMatchRanks(db, id, api);
+            CHECK(!b.ok);
+            CHECK_EQ(b.fetched, 0);
+        }
+
+        CHECK(db.upsertMatch(*match, matchRaw, tlRaw));
+
+        // A stored match with no rank read yet: it says how many are missing
+        // and offers no average at all.
+        MatchRankView none = storedMatchRanks(db, "TEST_1");
+        CHECK_EQ(none.known, 0);
+        CHECK_EQ(none.missing, 10);
+        CHECK(none.averageTier.empty());
+        CHECK(none.note.find("10 de 10") != std::string::npos);
+
+        // With no key, a stored match still refuses and explains itself. This
+        // is the state the user is in until they set one.
+        RiotApiConfig noKey;
+        auto needsKey = refreshMatchRanks(db, "TEST_1", noKey);
+        CHECK(!needsKey.ok);
+        CHECK_EQ(needsKey.fetched, 0);
+        CHECK(needsKey.message.find("clave") != std::string::npos);
+
+        // Ten players read: five IRON IV (step 0) and five SILVER IV (step 8).
+        // The average of the official steps is 4, which is BRONZE IV.
+        for (int pid = 1; pid <= 10; ++pid) {
+            RivalRank r;
+            r.participantId = pid;
+            r.tier = pid <= 5 ? "IRON" : "SILVER";
+            r.division = "IV";
+            r.leaguePoints = 50;
+            r.readAtEpoch = 1757000000;
+            db.upsertMatchRank("TEST_1", r);
+        }
+        MatchRankView full = storedMatchRanks(db, "TEST_1");
+        CHECK_EQ(full.known, 10);
+        CHECK_EQ(full.missing, 0);
+        CHECK_EQ(full.averageTier, std::string("BRONZE"));
+        CHECK_EQ(full.averageDivision, std::string("IV"));
+        CHECK(full.note.empty());
+        const RivalRank* one = full.byParticipant(3);
+        CHECK(one != nullptr);
+        if (one) {
+            CHECK(one->cached());
+            CHECK(one->ranked());
+            CHECK_EQ(one->display(), std::string("IRON IV · 50 LP"));
+        }
+        CHECK(full.byParticipant(99) == nullptr);
+
+        // An upsert of the same slot replaces it; it never adds a second row.
+        RivalRank climbed;
+        climbed.participantId = 3;
+        climbed.tier = "GOLD";
+        climbed.division = "I";
+        climbed.leaguePoints = 12;
+        climbed.readAtEpoch = 1757000100;
+        db.upsertMatchRank("TEST_1", climbed);
+        MatchRankView after = storedMatchRanks(db, "TEST_1");
+        CHECK_EQ((int)after.rows.size(), 10);
+        const RivalRank* moved = after.byParticipant(3);
+        CHECK(moved != nullptr);
+        if (moved) CHECK_EQ(moved->tier, std::string("GOLD"));
+
+        // A player read with no rank in this queue counts as read, not missing.
+        RivalRank unranked;
+        unranked.participantId = 4;
+        unranked.readAtEpoch = 1757000200;
+        db.upsertMatchRank("TEST_1", unranked);
+        MatchRankView mixed = storedMatchRanks(db, "TEST_1");
+        CHECK_EQ(mixed.unranked, 1);
+        CHECK_EQ(mixed.known, 9);
+        CHECK_EQ(mixed.missing, 0);
+        CHECK_EQ(mixed.byParticipant(4)->display(), std::string("Sin clasificar"));
+
+        // Under six known ranks there is no average: three of ten averaged and
+        // called "the average of the game" would be a lie (PRD 3.3).
+        fs::path thinDb = fs::temp_directory_path() / "riftloop_rivalrank_thin.db";
+        fs::remove(thinDb, rmErr);
+        Db thin(thinDb);
+        CHECK(thin.upsertMatch(*match, matchRaw, tlRaw));
+        for (int pid = 1; pid <= 3; ++pid) {
+            RivalRank r;
+            r.participantId = pid;
+            r.tier = "GOLD";
+            r.division = "II";
+            r.readAtEpoch = 1757000000;
+            thin.upsertMatchRank("TEST_1", r);
+        }
+        MatchRankView few = storedMatchRanks(thin, "TEST_1");
+        CHECK_EQ(few.known, 3);
+        CHECK(few.averageTier.empty());
+        CHECK(few.note.find("7 de 10") != std::string::npos);
+
+        // The wipe is total. The rank of other people cannot survive it
+        // (PRD 16.4).
+        db.wipeAll();
+        CHECK(db.matchRanks("TEST_1").empty());
     }
 
     // --- ipc frame roundtrip -----------------------------------------------

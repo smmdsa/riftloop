@@ -218,6 +218,7 @@ int itemHeight(const RVItem& it) {
         case RVKind::Spacer:  return 12;
         case RVKind::ClipCard: return 84;
         case RVKind::TeamStrip: return it.compact ? 50 : 78;
+        case RVKind::PlayerRow: return 34;
     }
     return 22;
 }
@@ -315,6 +316,70 @@ void rvPaint(HWND hwnd, RVData* d) {
                         SIZE sz;
                         GetTextExtentPoint32W(dc, it.right.c_str(), (int)it.right.size(), &sz);
                         TextOutW(dc, W - 20 - sz.cx, y + 8, it.right.c_str(),
+                                 (int)it.right.size());
+                    }
+                    break;
+                }
+                case RVKind::PlayerRow: {
+                    // A scoreboard line: portrait, name and role, KDA, farm,
+                    // then the chips. Every column starts at a fixed offset so
+                    // ten rows read as a table and not as ten sentences.
+                    HBITMAP bmp = it.iconKind.empty()
+                                      ? nullptr
+                                      : icons::get(it.iconKind, it.iconId, it.iconUrl);
+                    if (bmp) drawBitmap(dc, bmp, x, y + 3, 26);
+                    else if (!it.iconKind.empty()) {
+                        RECT ph{x, y + 3, x + 26, y + 29};
+                        HBRUSH phb = CreateSolidBrush(theme::kCardHi);
+                        FillRect(dc, &ph, phb);
+                        DeleteObject(phb);
+                    }
+                    // The colour band on the left says which side played it.
+                    if (it.color) {
+                        RECT band{x - 8, y + 3, x - 5, y + 29};
+                        HBRUSH cb = CreateSolidBrush(it.color);
+                        FillRect(dc, &band, cb);
+                        DeleteObject(cb);
+                    }
+
+                    SelectObject(dc, theme::small_());
+                    SetTextColor(dc, theme::kText);
+                    RECT nameRc{x + 34, y + 2, x + 34 + 174, y + 32};
+                    DrawTextW(dc, it.text.c_str(), -1, &nameRc,
+                              DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS);
+
+                    SetTextColor(dc, theme::kDim);
+                    RECT kdaRc{x + 214, y + 2, x + 214 + 90, y + 32};
+                    DrawTextW(dc, it.kda.c_str(), -1, &kdaRc,
+                              DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+                    RECT farmRc{x + 306, y + 2, x + 306 + 170, y + 32};
+                    DrawTextW(dc, it.farm.c_str(), -1, &farmRc,
+                              DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS);
+
+                    int cx = x + 484;
+                    for (size_t ci = 0; ci < it.chips.size(); ++ci) {
+                        if ((int)ci == it.chipGap && ci > 0) cx += 10;
+                        const RVChip& chip = it.chips[ci];
+                        RECT slot{cx, y + 5, cx + 22, y + 27};
+                        HBITMAP cb = chip.id.empty()
+                                         ? nullptr
+                                         : icons::get(chip.kind, chip.id, chip.url);
+                        if (cb) {
+                            drawBitmap(dc, cb, cx, y + 5, 22);
+                        } else {
+                            HBRUSH e = CreateSolidBrush(theme::kBg);
+                            FillRect(dc, &slot, e);
+                            DeleteObject(e);
+                        }
+                        cx += 24;
+                    }
+
+                    if (!it.right.empty()) {
+                        SelectObject(dc, theme::small_());
+                        SetTextColor(dc, theme::kDim);
+                        SIZE sz;
+                        GetTextExtentPoint32W(dc, it.right.c_str(), (int)it.right.size(), &sz);
+                        TextOutW(dc, W - 20 - sz.cx, y + 9, it.right.c_str(),
                                  (int)it.right.size());
                     }
                     break;

@@ -85,6 +85,11 @@ public:
     std::string itemIconUrl(int itemId) const;
     std::string perkIconUrl(int perkOrStyleId) const;    // "" when unknown
     std::string spellIconUrl(const std::string& simpleName) const;   // "Flash" -> URL
+    // Map background. 11 is Summoner's Rift; the CDN has no other map we draw.
+    std::string mapIconUrl(int mapId = 11) const;
+    // Spell icon straight from the numeric key of a match payload (4 -> Flash).
+    // "" when the key is unknown.
+    std::string spellIconUrlByKey(int key) const;
 
     // Composition traits for one champion (PRD 11.3, derived from tags + info
     // + a small curated table; approximate by design and labeled as such).

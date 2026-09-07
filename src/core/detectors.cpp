@@ -78,12 +78,13 @@ struct Ctx {
         return out;
     }
     Evidence makeEvidence(int64_t tsMs, std::string facts, std::string inference,
-                          std::string confidence, std::string exclusions) const {
+                          std::string confidence, std::string exclusions,
+                          const char* source = "timeline") const {
         Evidence ev;
         ev.evidenceId = in.match.matchId + "-" + std::to_string(tsMs);
         ev.matchId = in.match.matchId;
         ev.gameTimestampMs = tsMs;
-        ev.source = "timeline";
+        ev.source = source;
         ev.observedFacts = std::move(facts);
         ev.inference = std::move(inference);
         ev.confidence = std::move(confidence);
@@ -249,8 +250,7 @@ void d06(const Ctx& c, std::vector<Finding>& out) {
     auto csAt = [&](int64_t ts) {
         const TLFrame* fr = c.frameAt(ts);
         if (!fr) return 0;
-        auto it = fr->cs.find(c.in.userId);
-        return it == fr->cs.end() ? 0 : it->second;
+        return fr->cs(c.in.userId);      // lane + jungle, as this rule always read it
     };
     double early = (csAt(14 * kMin) - csAt(4 * kMin)) / 10.0;    // cs/min 4-14
     int64_t endTs = std::min<int64_t>((int64_t)c.in.match.gameDurationSec * 1000, 26 * kMin);
@@ -428,6 +428,75 @@ void d10(const Ctx& c, std::vector<Finding>& out) {
     if (f.opportunities > 0) out.push_back(std::move(f));
 }
 
+// --- D11: death time against the player's own team (replay only) -----------
+// The .rofl gives TOTAL_TIME_SPENT_DEAD of all ten. The reference is the median
+// of the user's own team in this same game: a local yardstick, with no invented
+// threshold and no teammate named (PRD 9.11, 12.2).
+void d11(const Ctx& c, std::vector<Finding>& out) {
+    if (!c.user || !c.in.rofl || !c.in.rofl->ok) return;
+    const RoflPlayer* me = c.in.rofl->user();
+    if (!me) return;
+
+    auto metric = [](const RoflPlayer& p, const char* key) -> int {
+        auto it = p.metrics.find(key);
+        return it == p.metrics.end() ? -1 : it->second;
+    };
+    int deadSec = metric(*me, "TOTAL_TIME_SPENT_DEAD");
+    int playedSec = metric(*me, "TIME_PLAYED");
+    if (deadSec < 0 || playedSec <= 0) return;
+    // Under 15 minutes the respawn timer is short and the cost is small. A
+    // surrendered game says nothing about how the player spends their time.
+    if (playedSec < 15 * 60) return;
+
+    std::vector<int> teamDead;
+    for (const auto& p : c.in.rofl->players) {
+        if (p.team != me->team || p.isUser) continue;
+        int d = metric(p, "TOTAL_TIME_SPENT_DEAD");
+        if (d >= 0) teamDead.push_back(d);
+    }
+    if (teamDead.size() < 3) return;          // not a team, just a couple of rows
+    std::sort(teamDead.begin(), teamDead.end());
+    int teamMedian = teamDead[teamDead.size() / 2];
+
+    Finding f = baseFinding(c, "D11", "Tiempo muerto por encima del de tu equipo",
+        "Cada segundo muerto es un segundo sin farmear, sin vision y sin presionar. "
+        "Es tiempo que no vuelve.",
+        "Antes de entrar, pregunta que ganas si sale bien. Si la respuesta es nada, "
+        "no entres: el intercambio ya lo pierdes al morir.",
+        "media", 0.7);
+    f.opportunities = 1;
+
+    double share = (double)deadSec / playedSec;
+    // Two conditions on purpose. The first says "more than your own side today".
+    // The second stops a game where nobody died from raising a finding.
+    bool overTeam = teamMedian > 0 && deadSec > teamMedian * 14 / 10;
+    bool overShare = share > 0.15;
+    if (overTeam && overShare) {
+        f.failures = 1;
+        int deaths = 0;
+        int64_t lastDeath = 0;
+        for (const auto& e : c.in.timeline.events) {
+            if (e.type != TLType::ChampionKill || e.victimId != c.in.userId) continue;
+            ++deaths;
+            lastDeath = std::max(lastDeath, e.tsMs);
+        }
+        char buf[240];
+        snprintf(buf, sizeof buf,
+                 "%d s muerto de %d jugados (%.0f %%), en %d muertes. "
+                 "La mediana de tu equipo en esta partida fue %d s.",
+                 deadSec, playedSec, share * 100.0, deaths, teamMedian);
+        int64_t at = lastDeath > 0 ? lastDeath : (int64_t)playedSec * 1000;
+        f.evidence.push_back(c.makeEvidence(at, buf,
+            "El replay da el total, no el instante de cada muerte: esto mide cuanto, "
+            "no cuando.",
+            "media",
+            "partidas < 15 min excluidas; equipos con menos de 3 companeros medidos "
+            "excluidos; no se compara con el equipo rival",
+            "replay"));
+    }
+    out.push_back(std::move(f));
+}
+
 } // namespace
 
 std::vector<Finding> runDetectors(const DetectorInput& in) {
@@ -437,6 +506,7 @@ std::vector<Finding> runDetectors(const DetectorInput& in) {
     if (!c.user) return out;
     d01(c, out); d02(c, out); d03(c, out); d04(c, out); d05(c, out);
     d06(c, out); d07(c, out); d08(c, out); d09(c, out); d10(c, out);
+    d11(c, out);
     return out;
 }
 
@@ -468,12 +538,14 @@ std::string detectorDomain(const std::string& id) {
     if (id == "D05" || id == "D10") return "conversion-ventajas";
     if (id == "D06") return "wave-management";
     if (id == "D09") return "itemizacion";
+    if (id == "D11") return "posicionamiento";
     return "general";
 }
 
 double detectorControllability(const std::string& id) {
     if (id == "D03" || id == "D04" || id == "D09") return 1.0;   // fully user-controlled
     if (id == "D01" || id == "D02" || id == "D06" || id == "D07") return 0.8;
+    if (id == "D11") return 0.7;   // the player decides the fights, not the deaths alone
     if (id == "D05") return 0.6;
     return 0.4;                                                  // D08, D10: team context
 }

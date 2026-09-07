@@ -20,9 +20,13 @@
 #include "core/missions.h"
 #include "core/patchimpact.h"
 #include "core/planner.h"
+#include "core/rank.h"
+#include "core/rivalrank.h"
 #include "core/recommend.h"
 #include "core/serial.h"
 #include "core/util.h"
+#include "curveview.h"
+#include "heatview.h"
 #include "ui.h"
 
 #include <windows.h>
@@ -59,10 +63,11 @@ enum : int {
     // profile
     IDC_RIOTID = 1100, IDC_MODE_ESCALAR, IDC_MODE_APRENDER, IDC_ROLE_MAIN, IDC_ROLE_SECOND,
     IDC_POOL_LIST, IDC_POOL_CHAMP, IDC_POOL_ROLE, IDC_POOL_TIER, IDC_POOL_GAMES,
-    IDC_POOL_ADD, IDC_POOL_DEL, IDC_POOL_SUGGEST, IDC_SAVE_PROFILE,
+    IDC_POOL_ADD, IDC_POOL_DEL, IDC_POOL_SUGGEST, IDC_SAVE_PROFILE, IDC_RANK_LABEL,
     IDC_IMPORT_JSON, IDC_FETCH_API, IDC_ANALYZE, IDC_PROFILE_STATUS,
     // matches
     IDC_MATCH_LIST = 1200, IDC_MATCH_OPEN, IDC_MATCH_REFRESH, IDC_MATCH_FETCH,
+    IDC_RANKS_VIEW, IDC_RANKS_FETCH, IDC_RANKS_ONE, IDC_RANKS_FORCE,
     // postmatch
     IDC_POST_VIEW = 1300, IDC_FB_OK, IDC_FB_PARTIAL, IDC_FB_WRONG, IDC_FB_CTX,
     IDC_ACCEPT_MISSION,
@@ -74,6 +79,10 @@ enum : int {
     IDC_DRAFT_GO = 1500, IDC_DRAFT_PLAN, IDC_DRAFT_QUIZ,
     IDC_DRAFT_VIEW,
     IDC_APPLY_RUNES = 1540, IDC_UNDO_RUNES,
+    // map
+    IDC_HEAT_VIEW = 1560, IDC_HEAT_20, IDC_HEAT_50, IDC_HEAT_ROLE,
+    // curves
+    IDC_CURVE_VIEW = 1580, IDC_CURVE_PREV, IDC_CURVE_NEXT,
     // patch
     IDC_PATCH_VIEW = 1600, IDC_PATCH_REFRESH,
     // settings
@@ -81,6 +90,7 @@ enum : int {
     IDC_SET_WIPE, IDC_SET_AUDIT, IDC_SET_VIEW, IDC_SET_META, IDC_SET_CLIPS,
     IDC_OPEN_CLIPS, IDC_PRUNE_CLIPS, IDC_SET_KEEPFULL,
     IDC_MAKE_CLIPS, IDC_SET_RUNEWRITE,
+    IDC_SET_APIKEY, IDC_SET_APIKEY_SAVE, IDC_SET_APIKEY_CLEAR, IDC_SET_APIKEY_STATE,
     // quiz window
     IDC_QUIZ_OPT0 = 1800,            // ..1803
     IDC_QUIZ_NEXT = 1810,
@@ -90,15 +100,17 @@ constexpr UINT WM_APP_IPC = WM_APP + 10;
 constexpr UINT WM_APP_CLIPS = WM_APP + 11;      // wParam: 1 progress, 2 done
 // PRD 13.4: full recordings are capped at 2 GB of local storage.
 constexpr int64_t kRecordingQuotaBytes = 2LL * 1024 * 1024 * 1024;
-constexpr int kPages = 7;
+constexpr int kPages = 9;
 const wchar_t* kPageNames[kPages] = {L"Perfil", L"Partidas", L"Post-match", L"Misión",
-                                     L"Draft Lab", L"Parche", L"Ajustes"};
+                                     L"Draft Lab", L"Mapa", L"Curvas", L"Parche", L"Ajustes"};
 const wchar_t* kPageSubtitles[kPages] = {
     L"Tu cuenta, tu champion pool y tus datos",
     L"Historial importado desde el cliente",
     L"Evidencia, confianza y feedback",
     L"Una misión activa, medida por oportunidades",
     L"Top 3 y plan pregame (se rellena solo en champion select)",
+    L"Dónde mueres y dónde matas, sobre tus últimas partidas",
+    L"Oro, CS y experiencia de una partida contra tu propia mediana",
     L"Impacto del parche en tu pool",
     L"Módulos, privacidad y auditoría"};
 
@@ -115,6 +127,9 @@ struct App {
     HWND hwnd = nullptr;
     std::vector<HWND> pageControls[kPages];
     int currentPage = 0;
+    int  heatMatches = 20;      // how many matches the heat map reads
+    int  curveIndex = 0;        // which stored match the curve page shows
+    bool heatRoleOnly = false;
 
     std::unique_ptr<Db> db;
     Ddragon dd;
@@ -770,8 +785,148 @@ std::vector<RVItem> rvSettingsInfo() {
 
 // ------------------------------------------------------------- page refresh
 
+// The match highlighted in the list. Empty when nothing is selected.
+std::string selectedMatchId();
+
+std::string selectedMatchId() {
+    int sel = ListView_GetNextItem(ctl(IDC_MATCH_LIST), -1, LVNI_SELECTED);
+    if (sel < 0 || sel >= (int)g->matchRowIds.size()) return {};
+    return g->matchRowIds[sel];
+}
+
+// The ten ranks of one match already played, with how many are still unread.
+// The average is only shown when the core offers it (PRD 3.3: evidence, or
+// silence).
+std::vector<RVItem> rvMatchRanks(const std::string& matchId) {
+    std::vector<RVItem> v;
+    if (matchId.empty()) {
+        v.push_back({RVKind::Dim, L"Elige una partida de la lista para ver los rangos."});
+        return v;
+    }
+    auto match = parseMatch(g->db->matchJson(matchId));
+    if (!match) {
+        v.push_back({RVKind::Dim, L"Esa partida no se puede leer."});
+        return v;
+    }
+    MatchRankView rv = storedMatchRanks(*g->db, matchId);
+    std::string userPuuid = resolveUserPuuid(*g->db);
+
+    // The share of the team's damage this player did. It is the closest honest
+    // answer to "who carried" that this data supports, it is computed here in
+    // one line, and it never leaves this view: it scores ONE game, never a
+    // player across games (PRD 7 forbids an alternate rating).
+    int teamDamage[2] = {0, 0};
+    for (auto& p : match->participants)
+        teamDamage[p.teamId == 100 ? 0 : 1] += p.kills * 100 + p.assists * 40;
+
+    std::wstring head = rv.averageTier.empty()
+                      ? L"La partida, jugador a jugador"
+                      : L"La partida, jugador a jugador  ·  promedio " + w(rv.averageTier) +
+                        L" " + w(rv.averageDivision);
+    v.push_back({RVKind::Section, head});
+
+    for (int side = 0; side < 2; ++side) {
+        int teamId = side == 0 ? 100 : 200;
+        bool won = false;
+        for (auto& p : match->participants)
+            if (p.teamId == teamId) won = p.win;
+        RVItem header;
+        header.kind = RVKind::Dim;
+        header.text = (side == 0 ? L"Equipo azul · " : L"Equipo rojo · ") +
+                      std::wstring(won ? L"victoria" : L"derrota");
+        header.color = won ? theme::kGood : theme::kDanger;
+        v.push_back(std::move(header));
+
+        for (auto& p : match->participants) {
+            if (p.teamId != teamId) continue;
+            const RivalRank* r = rv.byParticipant(p.participantId);
+            RVItem it;
+            it.kind = RVKind::PlayerRow;
+            it.iconKind = "champ";
+            it.iconId = p.championName;
+            it.iconUrl = g->ddOk ? g->dd.championIconUrl(p.championName) : "";
+            bool isUser = !userPuuid.empty() && p.puuid == userPuuid;
+            it.text = w(champDisplay(p.championName)) +
+                      (p.position.empty() ? L"" : L" · " + w(p.position)) +
+                      (isUser ? L"  (tú)" : L"");
+            it.kda = w(std::to_string(p.kills) + " / " + std::to_string(p.deaths) + " / " +
+                       std::to_string(p.assists));
+            std::string gold = std::to_string(p.goldEarned / 1000) + "." +
+                               std::to_string((p.goldEarned % 1000) / 100) + "k";
+            it.farm = w("niv " + std::to_string(p.champLevel) + " · " +
+                        std::to_string(p.totalCs) + " CS · " + gold);
+            it.color = isUser ? theme::kAccent
+                              : (teamId == 100 ? RGB(58, 110, 165) : RGB(150, 62, 62));
+
+            // Spells, then the two rune styles, then the six items. The gap
+            // separates what the player chose before the game from what they
+            // built during it.
+            for (int spell : p.summonerSpells) {
+                RVChip c;
+                c.kind = "spell";
+                // The payload carries the numeric key. summonerNameByKey gives
+                // the localized name, which is not what the CDN path uses.
+                if (spell > 0 && g->ddOk) {
+                    c.url = g->dd.spellIconUrlByKey(spell);
+                    if (!c.url.empty()) c.id = std::to_string(spell);
+                }
+                it.chips.push_back(std::move(c));
+            }
+            for (int style : {p.perkPrimaryStyle, p.perkSubStyle}) {
+                RVChip c;
+                c.kind = "perk";
+                if (style > 0 && g->ddOk) {
+                    c.id = std::to_string(style);
+                    c.url = g->dd.perkIconUrl(style);
+                }
+                it.chips.push_back(std::move(c));
+            }
+            if (!p.perks.empty() && g->ddOk) {
+                RVChip key;   // the keystone, the one rune that shapes the build
+                key.kind = "perk";
+                key.id = std::to_string(p.perks[0]);
+                key.url = g->dd.perkIconUrl(p.perks[0]);
+                it.chips.push_back(std::move(key));
+            }
+            it.chipGap = (int)it.chips.size();
+            for (int item : p.finalItems) {
+                RVChip c;
+                c.kind = "item";
+                if (item > 0 && g->ddOk) {
+                    c.id = std::to_string(item);
+                    c.url = g->dd.itemIconUrl(item);
+                }
+                it.chips.push_back(std::move(c));
+            }
+
+            int share = teamDamage[side] > 0
+                      ? (p.kills * 100 + p.assists * 40) * 100 / teamDamage[side]
+                      : 0;
+            std::wstring right = std::to_wstring(share) + L"% del equipo";
+            if (r) right = w(r->display()) + L"   " + right;
+            it.right = right;
+            v.push_back(std::move(it));
+        }
+        if (side == 0) v.push_back({RVKind::Spacer});
+    }
+
+    v.push_back({RVKind::Dim,
+                 L"El porcentaje es la parte de las jugadas del equipo (kills y asistencias) "
+                 L"en la que estuvo cada uno. Mide esta partida y nada más."});
+    if (!rv.note.empty()) v.push_back({RVKind::Dim, w(rv.note)});
+    v.push_back({RVKind::Dim,
+                 L"El rango sólo se lee de partidas ya jugadas. En champion select los "
+                 L"rivales están anonimizados y esta consulta no existe (PRD 17.2)."});
+    return v;
+}
+
 void refreshMatchList() {
     HWND lv = ctl(IDC_MATCH_LIST);
+    // Remember WHICH match was selected, not which row. DeleteAllItems drops
+    // the selection, and a batch of icons lands here at any moment: without
+    // this the reader is thrown back to the newest game mid-read.
+    std::string wasSelected = selectedMatchId();
+    std::string userPuuid = resolveUserPuuid(*g->db);
     ListView_DeleteAllItems(lv);
     ImageList_RemoveAll(g->matchIcons);
     std::map<std::string, int> iconIdx;
@@ -795,15 +950,51 @@ void refreshMatchList() {
         };
         set(1, r.userRole);
         set(2, r.userWin ? "Victoria" : "Derrota");
-        set(3, std::to_string(r.durationSec / 60) + " min");
-        set(4, r.patch);
-        set(5, r.analyzed ? "analizada" : "pendiente");
+        // KDA, cs and gold come from the stored match, not from a new query.
+        // A row that only names the champion says nothing about the game.
+        std::string kda = "-", cs = "-", gold = "-";
+        if (auto m = parseMatch(g->db->matchJson(r.matchId))) {
+            const Participant* me = userPuuid.empty() ? nullptr : m->byPuuid(userPuuid);
+            if (me) {
+                kda = std::to_string(me->kills) + " / " + std::to_string(me->deaths) +
+                      " / " + std::to_string(me->assists);
+                cs = std::to_string(me->totalCs);
+                gold = std::to_string(me->goldEarned / 1000) + "." +
+                       std::to_string((me->goldEarned % 1000) / 100) + "k";
+            }
+        }
+        set(3, kda);
+        set(4, cs);
+        set(5, gold);
+        set(6, std::to_string(r.durationSec / 60) + " min");
+        set(7, r.patch);
+        set(8, r.analyzed ? "analizada" : "pendiente");
         ++i;
     }
+    if (i == 0) return;
+    // Put the mark back on the same match. Only a first visit, or a match that
+    // is gone, falls back to the newest row: with nothing selected the rank
+    // buttons have no match to work on.
+    int row = 0;
+    if (!wasSelected.empty()) {
+        for (size_t k = 0; k < g->matchRowIds.size(); ++k)
+            if (g->matchRowIds[k] == wasSelected) { row = (int)k; break; }
+    }
+    ListView_SetItemState(lv, row, LVIS_SELECTED | LVIS_FOCUSED,
+                          LVIS_SELECTED | LVIS_FOCUSED);
+    ListView_EnsureVisible(lv, row, FALSE);
 }
 
 void refreshProfileUi() {
     Profile p = g->db->loadProfile();
+
+    // The rank comes from the client when it is open, and from what was stored
+    // when it is not. It always says which of the two it is (TASK-0024).
+    Lcu rankLcu;
+    rankLcu.connect(Config::load().leagueLockfilePath);
+    RankView rank = currentRankView(*g->db, rankLcu.connected() ? &rankLcu : nullptr);
+    setText(IDC_RANK_LABEL, rank.known ? rank.rank.display() + "   " + rank.note : rank.note);
+
     setText(IDC_RIOTID, p.riotId.empty() ? "(se detecta del cliente de League)" : p.riotId);
     g->modeAprender = p.mode == AppMode::Aprender;
     InvalidateRect(ctl(IDC_MODE_ESCALAR), nullptr, TRUE);
@@ -890,6 +1081,16 @@ void refreshSettings() {
     CheckDlgButton(g->hwnd, IDC_SET_RUNEWRITE, cfg.runeWriteEnabled ? BST_CHECKED : 0);
     CheckDlgButton(g->hwnd, IDC_SET_KEEPFULL, cfg.keepFullRecording ? BST_CHECKED : 0);
     setText(IDC_SET_LOCKFILE, cfg.leagueLockfilePath);
+
+    // The key itself never goes back into the box: it is shown as a state, not
+    // as a value, so a screenshot of this page leaks nothing.
+    std::string key = Config::loadApiKey();
+    setText(IDC_SET_APIKEY_STATE,
+            key.empty() ? "Sin clave. Sin ella el rango de los rivales no se puede leer; "
+                          "todo lo demas funciona igual."
+                        : "Clave guardada y protegida con DPAPI (" +
+                          key.substr(0, 9) + "...). Solo tu cuenta de Windows la lee.");
+    setText(IDC_SET_APIKEY, "");
     rvSet(ctl(IDC_SET_VIEW), rvSettingsInfo());
 }
 
@@ -1887,6 +2088,9 @@ void buildPages() {
 
     // ---- 0: Perfil ---------------------------------------------------------
     mk(0, L"STATIC", L"Riot ID", WS_VISIBLE, X, Y, 90, 20, 0);
+    // The rank goes on the identity row, right of the save button. The rows
+    // below it are already taken, and it belongs next to the Riot ID.
+    mk(0, L"STATIC", L"", WS_VISIBLE, X + 880, Y + 24, 390, 22, IDC_RANK_LABEL);
     mk(0, L"EDIT", L"", WS_VISIBLE | WS_BORDER, X, Y + 22, 240, 26, IDC_RIOTID);
     mk(0, L"STATIC", L"Modo", WS_VISIBLE, X + 260, Y, 90, 20, 0);
     mkButton(0, L"Escalar", X + 260, Y + 22, 100, 26, IDC_MODE_ESCALAR);
@@ -1935,14 +2139,21 @@ void buildPages() {
 
     // ---- 1: Partidas -------------------------------------------------------
     HWND ml = mk(1, WC_LISTVIEWW, L"", WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SINGLESEL, X, Y,
-                 W, 480, IDC_MATCH_LIST);
-    addListViewColumns(ml, {{L"Campeón", 200}, {L"Rol", 100}, {L"Resultado", 100},
-                            {L"Duración", 90}, {L"Parche", 80}, {L"Estado", 110}});
+                 W, 400, IDC_MATCH_LIST);
+    addListViewColumns(ml, {{L"Campeón", 170}, {L"Rol", 90}, {L"Resultado", 90},
+                            {L"KDA", 110}, {L"CS", 70}, {L"Oro", 80},
+                            {L"Duración", 85}, {L"Parche", 70}, {L"Estado", 100}});
     g->matchIcons = ImageList_Create(28, 28, ILC_COLOR32, 32, 64);
     ListView_SetImageList(ml, g->matchIcons, LVSIL_SMALL);
-    mkButton(1, L"⟳ Buscar partidas nuevas", X, Y + 492, 200, 30, IDC_MATCH_FETCH);
-    mkButton(1, L"Ver análisis", X + 210, Y + 492, 140, 30, IDC_MATCH_OPEN);
-    mkButton(1, L"Refrescar", X + 360, Y + 492, 120, 30, IDC_MATCH_REFRESH);
+    mkButton(1, L"⟳ Buscar partidas nuevas", X, Y + 412, 200, 30, IDC_MATCH_FETCH);
+    mkButton(1, L"Ver análisis", X + 210, Y + 412, 140, 30, IDC_MATCH_OPEN);
+    mkButton(1, L"Refrescar", X + 360, Y + 412, 120, 30, IDC_MATCH_REFRESH);
+    // Ranks of a game already played. Never champion select (PRD 17.2): the
+    // core refuses any id that is not a stored match.
+    mkButton(1, L"Rangos de esta partida", X + 500, Y + 412, 200, 30, IDC_RANKS_FETCH);
+    mkButton(1, L"Sólo mi rival de línea", X + 710, Y + 412, 190, 30, IDC_RANKS_ONE);
+    mkButton(1, L"Forzar relectura", X + 910, Y + 412, 160, 30, IDC_RANKS_FORCE);
+    mkReport(1, X, Y + 454, W, 350, IDC_RANKS_VIEW);
 
     // ---- 2: Post-match -----------------------------------------------------
     // Two columns: the diagnosis on the left, the clips that back it up on the
@@ -2006,33 +2217,181 @@ void buildPages() {
     mkReport(4, X, Y + 40, W, kDraftViewH, IDC_DRAFT_VIEW);
     rvSet(ctl(IDC_DRAFT_VIEW), rvDraftIdle());
 
-    // ---- 5: Parche ---------------------------------------------------------
-    mkReport(5, X, Y, W, 480, IDC_PATCH_VIEW);
-    mkButton(5, L"Actualizar", X, Y + 492, 130, 30, IDC_PATCH_REFRESH);
+    // ---- 5: Mapa -----------------------------------------------------------
+    // The heat view owns its own legend and its own toggles, so the page only
+    // adds how many matches to read.
+    mkButton(5, L"20 partidas", X, Y, 130, 28, IDC_HEAT_20);
+    mkButton(5, L"50 partidas", X + 140, Y, 130, 28, IDC_HEAT_50);
+    mkButton(5, L"Solo mi rol", X + 280, Y, 130, 28, IDC_HEAT_ROLE);
+    {
+        HWND hv = CreateWindowW(L"RiftLoopHeatmap", L"", WS_CHILD | WS_VISIBLE, X, Y + 40, W,
+                                kWinH - Y - 96, g->hwnd, (HMENU)(INT_PTR)IDC_HEAT_VIEW, nullptr,
+                                nullptr);
+        g->pageControls[5].push_back(hv);
+    }
 
-    // ---- 6: Ajustes --------------------------------------------------------
-    mk(6, L"BUTTON", L"Overlay en partida", WS_VISIBLE | BS_AUTOCHECKBOX, X, Y, 220, 26,
+    // ---- 6: Curvas ---------------------------------------------------------
+    mkButton(6, L"Anterior", X, Y, 110, 28, IDC_CURVE_PREV);
+    mkButton(6, L"Siguiente", X + 120, Y, 110, 28, IDC_CURVE_NEXT);
+    {
+        HWND cv = CreateWindowW(L"RiftLoopCurves", L"", WS_CHILD | WS_VISIBLE, X, Y + 40, W,
+                                kWinH - Y - 96, g->hwnd, (HMENU)(INT_PTR)IDC_CURVE_VIEW, nullptr,
+                                nullptr);
+        g->pageControls[6].push_back(cv);
+    }
+
+    // ---- 7: Parche ---------------------------------------------------------
+    mkReport(7, X, Y, W, 480, IDC_PATCH_VIEW);
+    mkButton(7, L"Actualizar", X, Y + 492, 130, 30, IDC_PATCH_REFRESH);
+
+    // ---- 8: Ajustes --------------------------------------------------------
+    mk(8, L"BUTTON", L"Overlay en partida", WS_VISIBLE | BS_AUTOCHECKBOX, X, Y, 220, 26,
        IDC_SET_OVERLAY);
-    mk(6, L"BUTTON", L"Lectura del cliente (LCU)", WS_VISIBLE | BS_AUTOCHECKBOX, X + 240, Y, 240,
+    mk(8, L"BUTTON", L"Lectura del cliente (LCU)", WS_VISIBLE | BS_AUTOCHECKBOX, X + 240, Y, 240,
        26, IDC_SET_LCU);
-    mk(6, L"BUTTON", L"Grabación local (beta)", WS_VISIBLE | BS_AUTOCHECKBOX, X + 500, Y, 240, 26,
+    mk(8, L"BUTTON", L"Grabación local (beta)", WS_VISIBLE | BS_AUTOCHECKBOX, X + 500, Y, 240, 26,
        IDC_SET_CAPTURE);
-    mk(6, L"BUTTON", L"Clips de evidencia desde el replay", WS_VISIBLE | BS_AUTOCHECKBOX, X,
+    mk(8, L"BUTTON", L"Clips de evidencia desde el replay", WS_VISIBLE | BS_AUTOCHECKBOX, X,
        Y + 108, 340, 26, IDC_SET_CLIPS);
-    mk(6, L"BUTTON", L"Aplicar runas al cliente (siempre con un clic tuyo)",
+    mk(8, L"BUTTON", L"Aplicar runas al cliente (siempre con un clic tuyo)",
        WS_VISIBLE | BS_AUTOCHECKBOX, X + 360, Y + 108, 420, 26, IDC_SET_RUNEWRITE);
-    mk(6, L"BUTTON", L"Conservar la partida completa además de los clips",
+    mk(8, L"BUTTON", L"Conservar la partida completa además de los clips",
        WS_VISIBLE | BS_AUTOCHECKBOX, X, Y + 178, 420, 26, IDC_SET_KEEPFULL);
-    mk(6, L"STATIC", L"Ruta del lockfile (vacío = autodetectar)", WS_VISIBLE, X, Y + 40, 280, 22,
+    mk(8, L"STATIC", L"Ruta del lockfile (vacío = autodetectar)", WS_VISIBLE, X, Y + 40, 280, 22,
        0);
-    mk(6, L"EDIT", L"", WS_VISIBLE | WS_BORDER, X + 290, Y + 38, 380, 26, IDC_SET_LOCKFILE);
-    mkButton(6, L"Abrir grabaciones", X, Y + 142, 170, 30, IDC_OPEN_CLIPS);
-    mkButton(6, L"Liberar espacio", X + 180, Y + 142, 160, 30, IDC_PRUNE_CLIPS);
-    mkButton(6, L"Guardar ajustes", X, Y + 78, 150, 30, IDC_SET_SAVE);
-    mkButton(6, L"Log de auditoría", X + 160, Y + 78, 150, 30, IDC_SET_AUDIT);
-    mkButton(6, L"Actualizar muestra", X + 320, Y + 78, 180, 30, IDC_SET_META);
-    mkButton(6, L"Borrar TODOS los datos", X + 510, Y + 78, 200, 30, IDC_SET_WIPE);
-    mkReport(6, X, Y + 210, W, 314, IDC_SET_VIEW);
+    mk(8, L"EDIT", L"", WS_VISIBLE | WS_BORDER, X + 290, Y + 38, 380, 26, IDC_SET_LOCKFILE);
+    // The Riot key. It never lands in a file of this repository and never in
+    // plain text: Config::saveApiKey seals it with DPAPI, so only this Windows
+    // account can read it back (PRD 16, 21.2, 29).
+    mk(8, L"STATIC", L"Clave de Riot (opcional, para el rango de los rivales)", WS_VISIBLE,
+       X + 760, Y, 420, 22, 0);
+    mk(8, L"EDIT", L"", WS_VISIBLE | WS_BORDER | ES_PASSWORD, X + 760, Y + 24, 300, 26,
+       IDC_SET_APIKEY);
+    mkButton(8, L"Guardar clave", X + 760, Y + 58, 140, 30, IDC_SET_APIKEY_SAVE);
+    mkButton(8, L"Borrar clave", X + 910, Y + 58, 140, 30, IDC_SET_APIKEY_CLEAR);
+    mk(8, L"STATIC", L"", WS_VISIBLE, X + 760, Y + 96, 420, 40, IDC_SET_APIKEY_STATE);
+
+    mkButton(8, L"Abrir grabaciones", X, Y + 142, 170, 30, IDC_OPEN_CLIPS);
+    mkButton(8, L"Liberar espacio", X + 180, Y + 142, 160, 30, IDC_PRUNE_CLIPS);
+    mkButton(8, L"Guardar ajustes", X, Y + 78, 150, 30, IDC_SET_SAVE);
+    mkButton(8, L"Log de auditoría", X + 160, Y + 78, 150, 30, IDC_SET_AUDIT);
+    mkButton(8, L"Actualizar muestra", X + 320, Y + 78, 180, 30, IDC_SET_META);
+    mkButton(8, L"Borrar TODOS los datos", X + 510, Y + 78, 200, 30, IDC_SET_WIPE);
+    mkReport(8, X, Y + 210, W, 314, IDC_SET_VIEW);
+}
+
+// Draws the curves of one match. The page walks the stored matches with the
+// two buttons, so a reader can compare a game against the next one.
+void refreshCurves() {
+    HWND view = ctl(IDC_CURVE_VIEW);
+    if (!view) return;
+    auto rows = g->db->listMatches(50);
+    if (rows.empty()) {
+        rl::MatchCurves empty;
+        empty.note = "No hay partidas importadas todavia. Abre Partidas e importa desde el cliente.";
+        cvSet(view, std::move(empty));
+        return;
+    }
+    if (g->curveIndex < 0) g->curveIndex = 0;
+    if (g->curveIndex >= (int)rows.size()) g->curveIndex = (int)rows.size() - 1;
+    cvSet(view, rl::buildCurves(*g->db, rows[g->curveIndex].matchId));
+}
+
+// Reads the last N stored matches and hands the cloud to the control. It never
+// downloads a match: everything here is already on disk (EP-03).
+void refreshHeatmap() {
+    HWND view = ctl(IDC_HEAT_VIEW);
+    if (!view) return;
+    rl::HeatQuery q;
+    q.matches = g->heatMatches;
+    if (g->heatRoleOnly) q.role = g->db->loadProfile().preferredRoles.empty()
+                               ? std::string()
+                               : g->db->loadProfile().preferredRoles.front();
+    rl::HeatMap h = collectHeat(*g->db, q);
+
+    rlui::HeatViewData d;
+    d.points = std::move(h.points);
+    d.matches = h.matchesRead;
+    d.note = w(h.note);
+    if (g->ddOk) d.mapUrl = g->dd.mapIconUrl(11);
+    hmSet(view, std::move(d));
+}
+
+// Asks Riot for the ranks the cache lacks. The call is spaced so a development
+// key stays inside its quota, and the user is told how long it takes before it
+// starts. onlyLaneRival limits it to the enemy in the user's own position.
+void fetchMatchRanks(bool onlyLaneRival, bool force) {
+    std::string matchId = selectedMatchId();
+    if (matchId.empty()) {
+        setText(IDC_PROFILE_STATUS, "Elige una partida de la lista primero.");
+        return;
+    }
+    RiotApiConfig api;
+    api.apiKey = Config::loadApiKey();
+    api.routing = Config::load().routing;
+
+    int only = 0;
+    auto match = parseMatch(g->db->matchJson(matchId));
+    if (onlyLaneRival && match) {
+        std::string puuid = resolveUserPuuid(*g->db);
+        const Participant* me = puuid.empty() ? nullptr : match->byPuuid(puuid);
+        if (me && !me->position.empty()) {
+            for (auto& p : match->participants)
+                if (p.teamId != me->teamId && p.position == me->position)
+                    only = p.participantId;
+        }
+        if (only == 0) {
+            setText(IDC_PROFILE_STATUS,
+                    "No hay un rival en tu misma posicion en esa partida.");
+            return;
+        }
+    }
+
+    int players = only ? 1 : (match ? (int)match->participants.size() : 10);
+    if (!only) {
+        std::wstring msg = L"Voy a leer el rango de " + std::to_wstring(players) +
+                           L" jugadores. Son " + std::to_wstring(players * 2) +
+                           L" llamadas espaciadas para no agotar tu cuota, unos " +
+                           std::to_wstring(estimatedRefreshSeconds(players)) +
+                           L" s. La ventana se queda quieta mientras tanto.\n\n¿Sigo?";
+        if (MessageBoxW(g->hwnd, msg.c_str(), L"Rangos de la partida",
+                        MB_OKCANCEL | MB_ICONINFORMATION) != IDOK)
+            return;
+    }
+
+    auto res = refreshMatchRanks(*g->db, matchId, api, only, force);
+    setText(IDC_PROFILE_STATUS, res.message);
+    rvSet(ctl(IDC_RANKS_VIEW), rvMatchRanks(matchId));
+}
+
+// Stores the Riot key, or removes it. It is written through DPAPI and never
+// echoed back to the box (TASK-0025).
+void saveApiKeyFromUi(bool clear) {
+    if (clear) {
+        Config::saveApiKey("");
+        g->db->audit("api_key", "{\"action\":\"cleared\"}");
+        setText(IDC_PROFILE_STATUS, "Clave de Riot borrada.");
+        refreshSettings();
+        return;
+    }
+    std::string key = n(ctl(IDC_SET_APIKEY));
+    // Trim: a key pasted from a browser often carries spaces or a newline.
+    while (!key.empty() && (unsigned char)key.front() <= ' ') key.erase(key.begin());
+    while (!key.empty() && (unsigned char)key.back() <= ' ') key.pop_back();
+    if (key.empty()) {
+        setText(IDC_PROFILE_STATUS, "Escribe la clave en el campo antes de guardarla.");
+        return;
+    }
+    if (key.rfind("RGAPI-", 0) != 0) {
+        setText(IDC_PROFILE_STATUS,
+                "Una clave de Riot empieza por RGAPI-. Copiala entera desde "
+                "developer.riotgames.com.");
+        return;
+    }
+    Config::saveApiKey(key);
+    g->db->audit("api_key", "{\"action\":\"saved\"}");
+    setText(IDC_PROFILE_STATUS, "Clave guardada y protegida con DPAPI.");
+    refreshSettings();
 }
 
 void switchPage(int page) {
@@ -2045,7 +2404,10 @@ void switchPage(int page) {
     if (g->playerWnd) showPlayerBar(g->playerWnd, page == 2 && !g->clipRowFiles.empty());
     switch (page) {
         case 0: refreshProfileUi(); break;
-        case 1: refreshMatchList(); break;
+        case 1:
+            refreshMatchList();
+            rvSet(ctl(IDC_RANKS_VIEW), rvMatchRanks(selectedMatchId()));
+            break;
         case 2:
             // Opening the page with nothing loaded showed an empty panel. Fall
             // back to the most recent analysed match.
@@ -2057,8 +2419,10 @@ void switchPage(int page) {
             }
             break;
         case 3: refreshMission(); break;
-        case 5: rvSet(ctl(IDC_PATCH_VIEW), rvPatch()); break;
-        case 6: refreshSettings(); break;
+        case 5: refreshHeatmap(); break;
+        case 6: refreshCurves(); break;
+        case 7: rvSet(ctl(IDC_PATCH_VIEW), rvPatch()); break;
+        case 8: refreshSettings(); break;
     }
     InvalidateRect(g->hwnd, nullptr, TRUE);
 }
@@ -2196,6 +2560,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return TRUE;
         case WM_NOTIFY: {
             auto* hdr = (NMHDR*)lp;
+            if (hdr->idFrom == IDC_MATCH_LIST && hdr->code == LVN_ITEMCHANGED) {
+                auto* nv = (NMLISTVIEW*)lp;
+                // Only the transition into "selected". LVN_ITEMCHANGED also
+                // fires for focus and for the row that just lost the mark.
+                if ((nv->uNewState & LVIS_SELECTED) && !(nv->uOldState & LVIS_SELECTED))
+                    rvSet(ctl(IDC_RANKS_VIEW), rvMatchRanks(selectedMatchId()));
+                return 0;
+            }
             if (hdr->idFrom == IDC_MATCH_LIST && hdr->code == NM_DBLCLK) {
                 int sel = ListView_GetNextItem(ctl(IDC_MATCH_LIST), -1, LVNI_SELECTED);
                 if (sel >= 0 && sel < (int)g->matchRowIds.size())
@@ -2217,6 +2589,29 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_COMMAND: {
             int id = LOWORD(wp);
+            if (id == IDC_HEAT_20 || id == IDC_HEAT_50) {
+                g->heatMatches = id == IDC_HEAT_20 ? 20 : 50;
+                refreshHeatmap();
+                return 0;
+            }
+            if (id == IDC_SET_APIKEY_SAVE || id == IDC_SET_APIKEY_CLEAR) {
+                saveApiKeyFromUi(id == IDC_SET_APIKEY_CLEAR);
+                return 0;
+            }
+            if (id == IDC_RANKS_FETCH || id == IDC_RANKS_ONE || id == IDC_RANKS_FORCE) {
+                fetchMatchRanks(id == IDC_RANKS_ONE, id == IDC_RANKS_FORCE);
+                return 0;
+            }
+            if (id == IDC_CURVE_PREV || id == IDC_CURVE_NEXT) {
+                g->curveIndex += id == IDC_CURVE_NEXT ? 1 : -1;
+                refreshCurves();
+                return 0;
+            }
+            if (id == IDC_HEAT_ROLE) {
+                g->heatRoleOnly = !g->heatRoleOnly;
+                refreshHeatmap();
+                return 0;
+            }
             if (id >= IDC_NAV0 && id < IDC_NAV0 + kPages) {
                 switchPage(id - IDC_NAV0);
                 for (int i = 0; i < kPages; ++i)
@@ -2238,7 +2633,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case IDC_FETCH_API:
                 case IDC_MATCH_FETCH: runFetch(); break;
                 case IDC_ANALYZE: runAnalysis(); break;
-                case IDC_MATCH_REFRESH: refreshMatchList(); break;
+                case IDC_MATCH_REFRESH:
+                    // The button worked in silence, so it read as dead.
+                    refreshMatchList();
+                    rvSet(ctl(IDC_RANKS_VIEW), rvMatchRanks(selectedMatchId()));
+                    setText(IDC_PROFILE_STATUS,
+                            std::to_string(g->matchRowIds.size()) +
+                            " partidas releidas de la base local.");
+                    break;
                 case IDC_MATCH_OPEN: {
                     int sel = ListView_GetNextItem(ctl(IDC_MATCH_LIST), -1, LVNI_SELECTED);
                     if (sel >= 0 && sel < (int)g->matchRowIds.size())
@@ -2405,6 +2807,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_APP_ICONS:
             // A batch of Data Dragon icons landed: repaint what shows them.
             for (int id : {IDC_POST_VIEW, IDC_DRAFT_VIEW, IDC_PATCH_VIEW, IDC_MISSION_VIEW,
+                           IDC_HEAT_VIEW,
                            IDC_SET_VIEW})
                 if (HWND v = ctl(id)) InvalidateRect(v, nullptr, FALSE);
             if (g->currentPage == 0) refreshProfileUi();
@@ -2453,6 +2856,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
 
     registerReportView(hInst);
     registerPlayerView(hInst);
+    registerHeatView(hInst);
+    registerCurveView(hInst);
     WNDCLASSW wc{};
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInst;
@@ -2480,10 +2885,17 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     if (app.ddOk) {
         fillChampCombo(ctl(IDC_POOL_CHAMP));
     }
-    if (std::wstring(GetCommandLineW()).find(L"--demo-draft") != std::wstring::npos) {
+    std::wstring cmdLine = GetCommandLineW();
+    if (cmdLine.find(L"--demo-draft") != std::wstring::npos) {
         loadDemoDraft();
         rvSet(ctl(IDC_DRAFT_VIEW), rvTop3(recommendTop3(*app.db, app.dd, draftContextFromUi())));
         switchPage(4);
+    } else if (size_t at = cmdLine.find(L"--page "); at != std::wstring::npos) {
+        // Opens straight on one page. A development flag: a screenshot of a
+        // page needs no click, and clicking the window steals the focus of a
+        // user who is playing.
+        int page = _wtoi(cmdLine.c_str() + at + 7);
+        switchPage(page >= 0 && page < kPages ? page : 0);
     } else {
         switchPage(0);
     }
