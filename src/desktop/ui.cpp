@@ -205,6 +205,9 @@ struct RVData {
     std::vector<RVItem> items;
     int scroll = 0;
     int contentHeight = 0;
+    // Hover state for the explanation tip. -1 = the pointer is on no row.
+    int  hoverIndex = -1;
+    bool trackingLeave = false;
 };
 
 int itemHeight(const RVItem& it) {
@@ -374,13 +377,38 @@ void rvPaint(HWND hwnd, RVData* d) {
                         cx += 24;
                     }
 
+                    // The place and the title, right-aligned. A percentage
+                    // alone did not read at a glance; a position does.
+                    int rightEdge = W - 16;
                     if (!it.right.empty()) {
                         SelectObject(dc, theme::small_());
                         SetTextColor(dc, theme::kDim);
                         SIZE sz;
                         GetTextExtentPoint32W(dc, it.right.c_str(), (int)it.right.size(), &sz);
-                        TextOutW(dc, W - 20 - sz.cx, y + 9, it.right.c_str(),
+                        TextOutW(dc, rightEdge - sz.cx, y + 9, it.right.c_str(),
                                  (int)it.right.size());
+                        rightEdge -= sz.cx + 14;
+                    }
+                    if (!it.title2.empty()) {
+                        SelectObject(dc, theme::small_());
+                        SIZE sz;
+                        GetTextExtentPoint32W(dc, it.title2.c_str(), (int)it.title2.size(), &sz);
+                        RECT pill{rightEdge - sz.cx - 14, y + 6, rightEdge, y + 28};
+                        HBRUSH pb = CreateSolidBrush(theme::kBg);
+                        FillRect(dc, &pill, pb);
+                        DeleteObject(pb);
+                        SetTextColor(dc, it.color ? it.color : theme::kAccent);
+                        DrawTextW(dc, it.title2.c_str(), -1, &pill,
+                                  DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+                        rightEdge = pill.left - 12;
+                    }
+                    if (!it.place.empty()) {
+                        SelectObject(dc, theme::body());
+                        SIZE sz;
+                        GetTextExtentPoint32W(dc, it.place.c_str(), (int)it.place.size(), &sz);
+                        SetTextColor(dc, theme::kText);
+                        TextOutW(dc, rightEdge - sz.cx, y + 6, it.place.c_str(),
+                                 (int)it.place.size());
                     }
                     break;
                 }
@@ -626,6 +654,38 @@ LRESULT CALLBACK ReportProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
+        case WM_MOUSEMOVE: {
+            if (!d) return 0;
+            POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            int idx = rvHitTest(hwnd, d, p.y);
+            // Ask for WM_MOUSELEAVE once per entry, so the tip dies when the
+            // pointer leaves the view instead of hanging over the desktop.
+            if (!d->trackingLeave) {
+                TRACKMOUSEEVENT tme{sizeof(TRACKMOUSEEVENT), TME_LEAVE, hwnd, 0};
+                TrackMouseEvent(&tme);
+                d->trackingLeave = true;
+            }
+            if (idx == d->hoverIndex) return 0;
+            d->hoverIndex = idx;
+            if (idx < 0 || idx >= (int)d->items.size() ||
+                d->items[idx].tipTitle.empty()) {
+                tipHide();
+                return 0;
+            }
+            POINT screen = p;
+            ClientToScreen(hwnd, &screen);
+            const RVItem& it = d->items[idx];
+            tipShow(hwnd, screen, it.tipTitle, it.tipSubtitle, it.tipLines, it.tipFooter);
+            return 0;
+        }
+        case WM_MOUSELEAVE: {
+            if (d) {
+                d->trackingLeave = false;
+                d->hoverIndex = -1;
+            }
+            tipHide();
+            return 0;
+        }
         case WM_LBUTTONUP:
             if (d) {
                 int idx = rvHitTest(hwnd, d, GET_Y_LPARAM(lp));
@@ -672,6 +732,7 @@ void registerReportView(HINSTANCE inst) {
 }
 
 void rvSet(HWND view, std::vector<RVItem> items) {
+    tipHide();
     if (!view) return;
     auto* d = (RVData*)GetWindowLongPtrW(view, GWLP_USERDATA);
     if (!d) return;

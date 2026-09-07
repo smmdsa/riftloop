@@ -20,6 +20,7 @@
 #include "core/missions.h"
 #include "core/patchimpact.h"
 #include "core/planner.h"
+#include "core/podium.h"
 #include "core/rank.h"
 #include "core/rivalrank.h"
 #include "core/recommend.h"
@@ -811,13 +812,10 @@ std::vector<RVItem> rvMatchRanks(const std::string& matchId) {
     MatchRankView rv = storedMatchRanks(*g->db, matchId);
     std::string userPuuid = resolveUserPuuid(*g->db);
 
-    // The share of the team's damage this player did. It is the closest honest
-    // answer to "who carried" that this data supports, it is computed here in
-    // one line, and it never leaves this view: it scores ONE game, never a
-    // player across games (PRD 7 forbids an alternate rating).
-    int teamDamage[2] = {0, 0};
-    for (auto& p : match->participants)
-        teamDamage[p.teamId == 100 ? 0 : 1] += p.kills * 100 + p.assists * 40;
+    // The podium of the ten. A bare percentage did not read at a glance, so
+    // the row carries a place and a title and the tip carries the arithmetic
+    // (core/podium.h). It scores ONE game and is never stored (PRD 7).
+    MatchPodium podium = buildPodium(*match);
 
     std::wstring head = rv.averageTier.empty()
                       ? L"La partida, jugador a jugador"
@@ -899,20 +897,43 @@ std::vector<RVItem> rvMatchRanks(const std::string& matchId) {
                 it.chips.push_back(std::move(c));
             }
 
-            int share = teamDamage[side] > 0
-                      ? (p.kills * 100 + p.assists * 40) * 100 / teamDamage[side]
-                      : 0;
-            std::wstring right = std::to_wstring(share) + L"% del equipo";
-            if (r) right = w(r->display()) + L"   " + right;
-            it.right = right;
+            if (const PodiumEntry* e = podium.byParticipant(p.participantId)) {
+                it.place = std::to_wstring(e->rank) + L"º";
+                it.title2 = w(e->title);
+                if (r) it.right = w(r->display());
+
+                // The tip: every factor, its numbers, and the points it gave.
+                it.tipTitle = std::to_wstring(e->rank) + L"º de 10 · " +
+                              w(champDisplay(p.championName));
+                it.tipSubtitle = e->title.empty()
+                               ? L"Puntuación de la partida: " + std::to_wstring(e->score) +
+                                 L" sobre 100"
+                               : w(e->title) + L" · " + w(e->titleWhy);
+                for (const auto& f : e->factors) {
+                    TipLine line;
+                    line.label = w(f.label);
+                    line.value = std::to_wstring(f.points) + L" / " + std::to_wstring(f.weight);
+                    line.bar = f.weight > 0 ? f.points * 100 / f.weight : 0;
+                    it.tipLines.push_back(std::move(line));
+                    TipLine detail;
+                    detail.label = L"      " + w(f.detail);
+                    it.tipLines.push_back(std::move(detail));
+                }
+                TipLine total;
+                total.label = L"Total";
+                total.value = std::to_wstring(e->score) + L" / 100";
+                total.bar = e->score;
+                it.tipLines.push_back(std::move(total));
+                it.tipFooter = L"Mide esta partida, no al jugador. No se guarda y no se "
+                               L"compara con otras partidas.";
+            }
             v.push_back(std::move(it));
         }
         if (side == 0) v.push_back({RVKind::Spacer});
     }
 
     v.push_back({RVKind::Dim,
-                 L"El porcentaje es la parte de las jugadas del equipo (kills y asistencias) "
-                 L"en la que estuvo cada uno. Mide esta partida y nada más."});
+                 L"Pasa el ratón por una fila para ver de dónde sale su puesto."});
     if (!rv.note.empty()) v.push_back({RVKind::Dim, w(rv.note)});
     v.push_back({RVKind::Dim,
                  L"El rango sólo se lee de partidas ya jugadas. En champion select los "
@@ -2858,6 +2879,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     registerPlayerView(hInst);
     registerHeatView(hInst);
     registerCurveView(hInst);
+    registerTipWindow(hInst);
     WNDCLASSW wc{};
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInst;

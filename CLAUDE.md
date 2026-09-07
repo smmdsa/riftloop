@@ -284,6 +284,13 @@ calidad o se apaga: **nunca degrada el juego en silencio**.
   timestamps, no infieren intención, no emiten causalidad y no sustituyen al motor determinista de
   legalidad. Toda salida pasa por esquema validado y grounding.
 - **Sin blame (§9.11).** No se etiqueta a compañeros como causa. Solo decisiones que el usuario controla.
+  El podio del historial (`src/core/podium.cpp`) sale de esta regla: reparte títulos por lo que
+  cada uno **hizo** (`EL SMURFER`, `MVP-CARRY`, `EL VERDUGO`…) y ninguno es negativo. Los últimos
+  puestos llevan su número y nada más.
+- **Puntuar una partida, nunca a un jugador (§7).** `buildPodium` da 0 a 100 con cinco factores de
+  peso escrito, y la UI enseña el desglose completo en un tooltip. Ese número **no se guarda en la
+  base y no se compara entre partidas**: guardarlo lo convertiría en la puntuación equivalente a un
+  MMR alternativo que §7 prohíbe.
 
 ## Privacidad por defecto
 

@@ -22,6 +22,7 @@
 #include "core/missions.h"
 #include "core/patchimpact.h"
 #include "core/planner.h"
+#include "core/podium.h"
 #include "core/rank.h"
 #include "core/recommend.h"
 #include "core/serial.h"
@@ -2051,6 +2052,128 @@ int main() {
         // (PRD 16.4).
         db.wipeAll();
         CHECK(db.matchRanks("TEST_1").empty());
+    }
+
+    // --- the podium of one match (TASK-0026) ---------------------------------
+    {
+        std::string raw = util::readFile(RL_FIXTURES_DIR "/sample/real_1.json");
+        auto pair = splitImport(raw);
+        CHECK(pair.has_value());
+        if (pair) {
+            auto m = parseMatch(pair->matchJson);
+            CHECK(m.has_value());
+            if (m) {
+                MatchPodium pod = buildPodium(*m);
+                CHECK_EQ((int)pod.entries.size(), 10);
+
+                // Ranks are 1..10, in order, with no gap and no repeat.
+                for (size_t i = 0; i < pod.entries.size(); ++i) {
+                    CHECK_EQ(pod.entries[i].rank, (int)i + 1);
+                    if (i > 0) CHECK(pod.entries[i - 1].score >= pod.entries[i].score);
+                }
+                // Every participant is on the podium exactly once.
+                for (auto& p : m->participants) CHECK(pod.byParticipant(p.participantId) != nullptr);
+                CHECK(pod.byParticipant(99) == nullptr);
+
+                // The score is the sum of its own factors, and the weights add
+                // up to 100. A total the breakdown cannot explain is a number
+                // out of nowhere (PRD 30).
+                for (const auto& e : pod.entries) {
+                    int sum = 0, weights = 0;
+                    for (const auto& f : e.factors) {
+                        sum += f.points;
+                        weights += f.weight;
+                        CHECK(f.points <= f.weight);
+                        CHECK(f.points >= 0);
+                        CHECK(!f.label.empty());
+                        CHECK(!f.detail.empty());
+                    }
+                    CHECK_EQ(sum, e.score);
+                    CHECK_EQ(weights, 100);
+                    CHECK(e.score >= 0 && e.score <= 100);
+                }
+
+                // The first place always carries the top title.
+                CHECK_EQ(at(pod.entries, 0).title, std::string("EL SMURFER"));
+                CHECK(!at(pod.entries, 0).titleWhy.empty());
+
+                // MVP-CARRY goes to the best player of the side that lost, and
+                // only there.
+                std::string carryFor;
+                for (const auto& e : pod.entries) {
+                    if (e.title != "MVP-CARRY") continue;
+                    const Participant* p = m->byId(e.participantId);
+                    CHECK(p != nullptr);
+                    if (p) {
+                        CHECK(!p->win);
+                        carryFor = p->championName;
+                        // Nobody from the losing side ranks above them.
+                        for (const auto& other : pod.entries) {
+                            if (other.rank >= e.rank) continue;
+                            const Participant* op = m->byId(other.participantId);
+                            if (op) CHECK(op->win);
+                        }
+                    }
+                }
+                CHECK(!carryFor.empty());
+
+                // A title belongs to one player only, and no player has two.
+                std::map<std::string, int> titleCount;
+                for (const auto& e : pod.entries)
+                    if (!e.title.empty()) ++titleCount[e.title];
+                for (auto& [title, n] : titleCount) {
+                    CHECK_EQ(n, 1);
+                    // No title reads as blame: PRD 9.11 forbids naming a
+                    // teammate as a cause, so the bottom rows carry no title.
+                    CHECK(title.find("PEOR") == std::string::npos);
+                    CHECK(title.find("INUTIL") == std::string::npos);
+                    CHECK(title.find("LASTRE") == std::string::npos);
+                }
+            }
+        }
+
+        // Winning is worth points, so two identical lines split on the result.
+        // Without it the best of the losing side outranks the winner who did
+        // the same, which is what made the old percentage read wrong.
+        {
+            json info;
+            info["gameVersion"] = "16.17.702.1234";
+            info["gameDuration"] = 1800;
+            info["queueId"] = 420;
+            for (int i = 0; i < 2; ++i) {
+                json pa;
+                pa["participantId"] = i + 1;
+                pa["puuid"] = "p" + std::to_string(i + 1);
+                pa["championName"] = "Ahri";
+                pa["teamId"] = i == 0 ? 100 : 200;
+                pa["teamPosition"] = "MIDDLE";
+                pa["win"] = i == 0;
+                pa["kills"] = 5; pa["deaths"] = 3; pa["assists"] = 5;
+                pa["goldEarned"] = 10000;
+                pa["totalMinionsKilled"] = 150; pa["neutralMinionsKilled"] = 0;
+                pa["champLevel"] = 15;
+                info["participants"].push_back(pa);
+            }
+            json j;
+            j["metadata"]["matchId"] = "TIE_1";
+            j["info"] = info;
+            auto tie = parseMatch(j.dump());
+            CHECK(tie.has_value());
+            if (tie) {
+                MatchPodium pod = buildPodium(*tie);
+                CHECK_EQ((int)pod.entries.size(), 2);
+                const Participant* first = tie->byId(at(pod.entries, 0).participantId);
+                CHECK(first != nullptr);
+                if (first) CHECK(first->win);
+                CHECK(at(pod.entries, 0).score > at(pod.entries, 1).score);
+            }
+        }
+
+        // An empty match produces an empty podium instead of a crash.
+        MatchSummary blank;
+        MatchPodium none = buildPodium(blank);
+        CHECK(none.entries.empty());
+        CHECK(none.byParticipant(1) == nullptr);
     }
 
     // --- ipc frame roundtrip -----------------------------------------------

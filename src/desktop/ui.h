@@ -57,6 +57,22 @@ HBITMAP peek(const std::string& kind, const std::string& id);
 void drawBitmap(HDC dc, HBITMAP bmp, int x, int y, int size);
 
 // ------------------------------------------------------------- report view
+// ------------------------------------------------------------------ tooltip
+// A dark popup that explains one number. It is a real window, not a rectangle
+// drawn inside a control, so it can spill past the edge of its parent.
+struct TipLine {
+    std::wstring label;
+    std::wstring value;
+    int          bar = -1;       // 0..100 fills a small bar; -1 draws none
+};
+
+void registerTipWindow(HINSTANCE inst);
+// Shows the tip near the screen point. An empty title hides it.
+void tipShow(HWND owner, POINT screenPt, const std::wstring& title,
+             const std::wstring& subtitle, const std::vector<TipLine>& lines,
+             const std::wstring& footer);
+void tipHide();
+
 // Item kinds for the ReportView control.
 enum class RVKind { Title, Section, Text, Dim, IconRow, Badge, Spacer, ClipCard, TeamStrip,
                     PlayerRow };
@@ -108,6 +124,12 @@ struct RVItem {
     std::wstring farm;               // "169 CS · 11.7k oro"
     std::vector<RVChip> chips;       // spells, then runes, then the six items
     int          chipGap = 0;        // index where a wider gap is drawn
+    // The podium: the place on the right, and the breakdown behind it. The
+    // row shows the place and the title; the tip shows where they came from.
+    std::wstring place;              // "1º"
+    std::wstring title2;             // "EL SMURFER", empty for most rows
+    std::wstring tipTitle, tipSubtitle, tipFooter;
+    std::vector<TipLine> tipLines;
 };
 
 // wParam = item index, lParam = the view HWND.
