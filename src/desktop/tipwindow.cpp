@@ -18,12 +18,15 @@ constexpr int kBarW = 54;
 constexpr int kMaxW = 460;
 
 struct TipData {
-    std::wstring title, subtitle, footer;
-    std::vector<TipLine> lines;
+    RVTip tip;
     int width = 320;
     int height = 100;
     int footerH = 0;
+    int treeH = 0;
 };
+
+constexpr int kTreeIcon = 26;
+constexpr int kTreeRowH = 34;
 
 HWND g_tip = nullptr;
 
@@ -36,7 +39,7 @@ TipData* dataOf(HWND h) {
 void measure(HDC dc, TipData& d) {
     int labelW = 0, valueW = 0;
     HGDIOBJ old = SelectObject(dc, theme::small_());
-    for (const auto& l : d.lines) {
+    for (const auto& l : d.tip.lines) {
         SIZE a{}, b{};
         GetTextExtentPoint32W(dc, l.label.c_str(), (int)l.label.size(), &a);
         GetTextExtentPoint32W(dc, l.value.c_str(), (int)l.value.size(), &b);
@@ -45,22 +48,29 @@ void measure(HDC dc, TipData& d) {
     }
     SelectObject(dc, theme::h2());
     SIZE t{};
-    GetTextExtentPoint32W(dc, d.title.c_str(), (int)d.title.size(), &t);
+    GetTextExtentPoint32W(dc, d.tip.title.c_str(), (int)d.tip.title.size(), &t);
 
-    int body = labelW + 18 + valueW + (d.lines.empty() ? 0 : kBarW + 12);
-    d.width = std::min(kMaxW, std::max({ 300, body + kPadX * 2, (int)t.cx + kPadX * 2 }));
+    int body = labelW + 18 + valueW + (d.tip.lines.empty() ? 0 : kBarW + 12);
+    // A rune tree is as wide as its widest row of icons.
+    int treeW = 0;
+    for (const auto& row : d.tip.tree)
+        treeW = std::max<int>(treeW, (int)row.iconUrls.size() * (kTreeIcon + 8));
+    d.width = std::min(kMaxW, std::max({ 300, body + kPadX * 2, (int)t.cx + kPadX * 2,
+                                         treeW + kPadX * 2 }));
+
+    d.treeH = (int)d.tip.tree.size() * kTreeRowH;
 
     d.footerH = 0;
-    if (!d.footer.empty()) {
+    if (!d.tip.footer.empty()) {
         SelectObject(dc, theme::tiny());
         RECT fr{ 0, 0, d.width - kPadX * 2, 0 };
-        DrawTextW(dc, d.footer.c_str(), -1, &fr, DT_CALCRECT | DT_WORDBREAK);
+        DrawTextW(dc, d.tip.footer.c_str(), -1, &fr, DT_CALCRECT | DT_WORDBREAK);
         d.footerH = fr.bottom + 10;
     }
     SelectObject(dc, old);
 
-    d.height = kPadY * 2 + kTitleH + (d.subtitle.empty() ? 0 : kSubH) +
-               (int)d.lines.size() * kLineH + d.footerH;
+    d.height = kPadY * 2 + kTitleH + (d.tip.subtitle.empty() ? 0 : kSubH) +
+               (int)d.tip.lines.size() * kLineH + d.treeH + d.footerH;
 }
 
 void paint(HWND hwnd, TipData& d) {
@@ -84,19 +94,19 @@ void paint(HWND hwnd, TipData& d) {
     SelectObject(dc, theme::h2());
     SetTextColor(dc, theme::kAccent);
     RECT tr{ kPadX, y, rc.right - kPadX, y + kTitleH };
-    DrawTextW(dc, d.title.c_str(), -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+    DrawTextW(dc, d.tip.title.c_str(), -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
     y += kTitleH;
 
-    if (!d.subtitle.empty()) {
+    if (!d.tip.subtitle.empty()) {
         SelectObject(dc, theme::small_());
         SetTextColor(dc, theme::kDim);
         RECT sr{ kPadX, y, rc.right - kPadX, y + kSubH };
-        DrawTextW(dc, d.subtitle.c_str(), -1, &sr, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+        DrawTextW(dc, d.tip.subtitle.c_str(), -1, &sr, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
         y += kSubH;
     }
 
     SelectObject(dc, theme::small_());
-    for (const auto& l : d.lines) {
+    for (const auto& l : d.tip.lines) {
         RECT lr{ kPadX, y, rc.right - kPadX, y + kLineH };
         SetTextColor(dc, theme::kText);
         DrawTextW(dc, l.label.c_str(), -1, &lr, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
@@ -123,11 +133,54 @@ void paint(HWND hwnd, TipData& d) {
         y += kLineH;
     }
 
-    if (!d.footer.empty()) {
+    // The rune tree: one row per slot, the chosen rune bright and framed.
+    for (const auto& row : d.tip.tree) {
+        int tx = kPadX;
+        for (size_t i = 0; i < row.iconUrls.size(); ++i) {
+            bool chosen = (int)i == row.chosen;
+            HBITMAP bmp = icons::peek("perk", row.iconUrls[i]);
+            if (!bmp) bmp = icons::get("perk", row.iconUrls[i], row.iconUrls[i]);
+            RECT slot{ tx, y + 4, tx + kTreeIcon, y + 4 + kTreeIcon };
+            if (chosen) {
+                RECT halo{ slot.left - 3, slot.top - 3, slot.right + 3, slot.bottom + 3 };
+                HBRUSH hb = CreateSolidBrush(theme::kAccent);
+                FrameRect(dc, &halo, hb);
+                DeleteObject(hb);
+            }
+            if (bmp) {
+                drawBitmap(dc, bmp, slot.left, slot.top, kTreeIcon);
+            } else {
+                HBRUSH e = CreateSolidBrush(theme::kBg);
+                FillRect(dc, &slot, e);
+                DeleteObject(e);
+            }
+            // A rune the player did not take is dimmed, so the row reads at a
+            // glance as "this one, out of these".
+            if (!chosen) {
+                HDC veil = CreateCompatibleDC(dc);
+                HBITMAP vb = CreateCompatibleBitmap(dc, kTreeIcon, kTreeIcon);
+                HGDIOBJ ov = SelectObject(veil, vb);
+                RECT vr{ 0, 0, kTreeIcon, kTreeIcon };
+                HBRUSH vbr = CreateSolidBrush(theme::kCardHi);
+                FillRect(veil, &vr, vbr);
+                DeleteObject(vbr);
+                BLENDFUNCTION bf{ AC_SRC_OVER, 0, 150, 0 };
+                AlphaBlend(dc, slot.left, slot.top, kTreeIcon, kTreeIcon, veil, 0, 0,
+                           kTreeIcon, kTreeIcon, bf);
+                SelectObject(veil, ov);
+                DeleteObject(vb);
+                DeleteDC(veil);
+            }
+            tx += kTreeIcon + 8;
+        }
+        y += kTreeRowH;
+    }
+
+    if (!d.tip.footer.empty()) {
         SelectObject(dc, theme::tiny());
         SetTextColor(dc, theme::kDim);
         RECT fr{ kPadX, y + 6, rc.right - kPadX, rc.bottom - 4 };
-        DrawTextW(dc, d.footer.c_str(), -1, &fr, DT_WORDBREAK);
+        DrawTextW(dc, d.tip.footer.c_str(), -1, &fr, DT_WORDBREAK);
     }
 
     BitBlt(winDc, 0, 0, rc.right, rc.bottom, dc, 0, 0, SRCCOPY);
@@ -174,10 +227,8 @@ void registerTipWindow(HINSTANCE inst) {
     RegisterClassW(&wc);
 }
 
-void tipShow(HWND owner, POINT screenPt, const std::wstring& title,
-             const std::wstring& subtitle, const std::vector<TipLine>& lines,
-             const std::wstring& footer) {
-    if (title.empty()) {
+void tipShow(HWND owner, POINT screenPt, const RVTip& tip) {
+    if (tip.title.empty()) {
         tipHide();
         return;
     }
@@ -189,10 +240,7 @@ void tipShow(HWND owner, POINT screenPt, const std::wstring& title,
     }
     auto* d = dataOf(g_tip);
     if (!d) return;
-    d->title = title;
-    d->subtitle = subtitle;
-    d->lines = lines;
-    d->footer = footer;
+    d->tip = tip;
 
     HDC dc = GetDC(g_tip);
     measure(dc, *d);

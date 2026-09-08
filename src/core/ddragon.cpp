@@ -13,6 +13,41 @@ namespace rl {
 
 namespace {
 
+// Riot writes item text as its own markup: <mainText>, <stats>, <attention>,
+// <br>. Angle brackets never appear as content, so dropping every tag is
+// enough, and <br> becomes the line break it stands for.
+std::string stripRiotMarkup(const std::string& html) {
+    std::string out;
+    out.reserve(html.size());
+    for (size_t i = 0; i < html.size(); ++i) {
+        if (html[i] != '<') {
+            out += html[i];
+            continue;
+        }
+        size_t end = html.find('>', i);
+        if (end == std::string::npos) break;
+        std::string tag = html.substr(i + 1, end - i - 1);
+        if (tag == "br" || tag == "br/" || tag == "/li") out += '\n';
+        i = end;
+    }
+    // Collapse the runs of blank lines the tags leave behind.
+    std::string tidy;
+    int newlines = 0;
+    for (char c : out) {
+        if (c == '\n') {
+            if (++newlines > 2) continue;
+        } else if (c != ' ' || (!tidy.empty() && tidy.back() != ' ')) {
+            newlines = 0;
+        } else {
+            continue;
+        }
+        tidy += c;
+    }
+    while (!tidy.empty() && (tidy.front() == '\n' || tidy.front() == ' ')) tidy.erase(tidy.begin());
+    while (!tidy.empty() && (tidy.back() == '\n' || tidy.back() == ' ')) tidy.pop_back();
+    return tidy;
+}
+
 constexpr const char* kHost = "ddragon.leagueoflegends.com";
 
 // Champions whose kit gives heavy healing/shielding; drives the anti-heal
@@ -143,6 +178,8 @@ bool Ddragon::parseFiles(const fs::path& dir) {
             ii.purchasable = it.contains("gold") ? it["gold"].value("purchasable", true) : true;
             for (auto& t : it.value("tags", json::array())) ii.tags.push_back(t);
             ii.depth = it.value("depth", 1);
+            ii.summary = it.value("plaintext", "");
+            ii.detail = stripRiotMarkup(it.value("description", ""));
             items_[ii.id] = std::move(ii);
         }
 

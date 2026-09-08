@@ -28,6 +28,11 @@ struct ItemInfo {
     std::vector<std::string> tags;
     bool        purchasable = true;
     int         depth = 1;           // 3 ~ finished item
+    std::string summary;             // "plaintext": one line, already localized
+    // "description" with the markup of Riot removed. Data Dragon writes it as
+    // <mainText><stats><attention>25</attention> Move Speed</stats>...; a UI
+    // that prints it raw shows the tags.
+    std::string detail;
 };
 
 struct RuneStyle {

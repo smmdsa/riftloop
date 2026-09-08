@@ -56,6 +56,11 @@ HBITMAP peek(const std::string& kind, const std::string& id);
 // Draws a 32bpp bitmap with alpha at the given size.
 void drawBitmap(HDC dc, HBITMAP bmp, int x, int y, int size);
 
+// An icon shipped with the program, from assets\icons next to the executable.
+// name has no extension: localIcon("lane-TOP"). Returns nullptr when the file
+// is missing, and every caller must draw something else in that case.
+HBITMAP localIcon(const std::string& name);
+
 // ------------------------------------------------------------- report view
 // ------------------------------------------------------------------ tooltip
 // A dark popup that explains one number. It is a real window, not a rectangle
@@ -66,11 +71,23 @@ struct TipLine {
     int          bar = -1;       // 0..100 fills a small bar; -1 draws none
 };
 
+// Everything one tooltip shows. An empty title means the zone has no tip.
+struct RVTip {
+    std::wstring title, subtitle, footer;
+    std::vector<TipLine> lines;
+    // A rune tree: four rows of icons, with the chosen one marked. Empty for
+    // every other kind of tip.
+    struct TreeRow {
+        std::vector<std::string> iconUrls;
+        std::vector<std::wstring> names;
+        int chosen = -1;
+    };
+    std::vector<TreeRow> tree;
+};
+
 void registerTipWindow(HINSTANCE inst);
 // Shows the tip near the screen point. An empty title hides it.
-void tipShow(HWND owner, POINT screenPt, const std::wstring& title,
-             const std::wstring& subtitle, const std::vector<TipLine>& lines,
-             const std::wstring& footer);
+void tipShow(HWND owner, POINT screenPt, const RVTip& tip);
 void tipHide();
 
 // Item kinds for the ReportView control.
@@ -126,10 +143,15 @@ struct RVItem {
     int          chipGap = 0;        // index where a wider gap is drawn
     // The podium: the place on the right, and the breakdown behind it. The
     // row shows the place and the title; the tip shows where they came from.
+    std::string  role;               // TOP|JUNGLE|MIDDLE|BOTTOM|UTILITY, drawn as a mark
+    std::string  tier;               // IRON..CHALLENGER; empty = unranked or unread
+    bool         tierRead = false;   // false dims the badge: nobody asked Riot yet
     std::wstring place;              // "1º"
     std::wstring title2;             // "EL SMURFER", empty for most rows
-    std::wstring tipTitle, tipSubtitle, tipFooter;
-    std::vector<TipLine> tipLines;
+    // One tip per column. The podium tip belongs to the place only: opening
+    // it over the whole row answered a question the reader had not asked.
+    RVTip tipPlace, tipName, tipKda, tipFarm, tipTier;
+    std::vector<RVTip> chipTips;     // parallel to chips
 };
 
 // wParam = item index, lParam = the view HWND.
