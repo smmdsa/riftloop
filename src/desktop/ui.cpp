@@ -301,6 +301,10 @@ void drawRoleMark(HDC dc, const std::string& role, int x, int y, int size, COLOR
     DeleteObject(br);
 }
 
+// Left margin of every row. The painter starts here and the tip hit test
+// measures from here, so the two can never drift apart.
+constexpr int kRowOriginX = 16;
+
 int itemHeight(const RVItem& it) {
     switch (it.kind) {
         case RVKind::Title:   return 44;
@@ -332,6 +336,9 @@ int measureItem(HDC dc, const RVItem& it, int width) {
 // The tip of the column under the pointer. Returns an empty tip when that
 // column has nothing to say. chip carries the chip index so the caller can
 // tell one hover from another without comparing whole tips.
+// localX is measured from the row origin, which is where the painter starts
+// drawing: kRowOriginX plus the indent of that item. Passing a window x with a
+// constant subtracted shifts every zone of an indented row.
 const RVTip* tipUnder(const RVData* d, int row, const RVItem& it, int localX, int& chip) {
     chip = -1;
     if (it.kind != RVKind::PlayerRow) return nullptr;
@@ -369,6 +376,13 @@ void rvPaint(HWND hwnd, RVData* d) {
     FillRect(dc, &rc, cardBr);
     SetBkMode(dc, TRANSPARENT);
 
+    // The place zones are measured while painting, so they belong to this
+    // frame only. Keeping the old ones lets a row inherit the zone of whatever
+    // sat at its index before: after a shorter list replaces a longer one, a
+    // stale entry makes tipUnder answer with an empty tipPlace and swallow
+    // every other column of that row.
+    d->placeLeft.clear();
+
     int y = 14 - d->scroll;
     // The index travels with the item: the place zone of the tip is measured
     // here, per row, and the hit test looks it up by the same index.
@@ -377,7 +391,7 @@ void rvPaint(HWND hwnd, RVData* d) {
         ++rowIndex;
         int h = measureItem(dc, it, W);
         if (y + h >= 0 && y <= H) {
-            int x = 16 + it.indent;
+            int x = kRowOriginX + it.indent;
             switch (it.kind) {
                 case RVKind::Title: {
                     int tx = x;
@@ -841,9 +855,11 @@ LRESULT CALLBACK ReportProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 d->trackingLeave = true;
             }
             int chip = -1;
-            const RVTip* tip = (idx >= 0 && idx < (int)d->items.size())
-                             ? tipUnder(d, idx, d->items[idx], p.x - 16, chip)
-                             : nullptr;
+            const RVTip* tip = nullptr;
+            if (idx >= 0 && idx < (int)d->items.size()) {
+                const RVItem& hovered = d->items[idx];
+                tip = tipUnder(d, idx, hovered, p.x - (kRowOriginX + hovered.indent), chip);
+            }
             if (idx == d->hoverIndex && chip == d->hoverChip) return 0;
             d->hoverIndex = idx;
             d->hoverChip = chip;
