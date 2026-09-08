@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cctype>
 #include <ctime>
+#include <utility>
 
 using nlohmann::json;
 
@@ -53,6 +54,41 @@ int ladderStep(const RivalRank& r) {
     return (int)(it - t.begin()) * 4 + divisionIndex(r.division);
 }
 
+// A Riot ID travels in the path, and game names carry spaces and accents.
+std::string urlEncode(const std::string& in) {
+    static const char* hex = "0123456789ABCDEF";
+    std::string out;
+    for (unsigned char c : in) {
+        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            out += (char)c;
+        } else {
+            out += '%';
+            out += hex[c >> 4];
+            out += hex[c & 15];
+        }
+    }
+    return out;
+}
+
+// "Nombre#TAG" -> {"Nombre", "TAG"}. Empty tag when there is no '#'.
+std::pair<std::string, std::string> splitRiotId(const std::string& riotId) {
+    size_t at = riotId.rfind('#');
+    if (at == std::string::npos) return { riotId, {} };
+    return { riotId.substr(0, at), riotId.substr(at + 1) };
+}
+
+// The regional host of a platform. account-v1 lives here; league-v4 does not.
+std::string regionalHost(const std::string& platform) {
+    if (platform.rfind("eu", 0) == 0 || platform == "tr1" || platform == "ru")
+        return "europe.api.riotgames.com";
+    if (platform == "kr" || platform == "jp1")
+        return "asia.api.riotgames.com";
+    if (platform == "oc1" || platform == "ph2" || platform == "sg2" || platform == "th2" ||
+        platform == "tw2" || platform == "vn2")
+        return "sea.api.riotgames.com";
+    return "americas.api.riotgames.com";
+}
+
 std::string apiGet(const RiotApiConfig& c, const std::string& host, const std::string& path,
                    std::string* error) {
     http::Options opt;
@@ -61,11 +97,24 @@ std::string apiGet(const RiotApiConfig& c, const std::string& host, const std::s
     if (r.status == 200) return r.body;
     if (error) {
         *error = r.status == 0 ? ("red: " + r.error)
+               : r.status == 401 ? "Riot rechaza tu clave (401). Suele ser una clave "
+                                   "cortada al pegarla o caducada: vuelve a ponerla en Ajustes"
+               : r.status == 400 ? "Riot rechazo el dato enviado (400). El puuid del "
+                                   "cliente no vale para la API: hace falta el Riot ID"
+               : r.status == 404 ? "Riot no conoce esa cuenta (404). Pudo cambiar de nombre"
                : r.status == 403 ? "la clave de Riot no vale o caduco"
                : r.status == 429 ? "cuota agotada: espera un minuto"
                : ("Riot API status " + std::to_string(r.status));
     }
     return {};
+}
+
+// An error that repeats for every player: stop rather than spend the quota
+// on nine more identical failures.
+bool isFatal(const std::string& err) {
+    return err.find("clave") != std::string::npos ||
+           err.find("cuota") != std::string::npos ||
+           err.find("401") != std::string::npos;
 }
 
 } // namespace
@@ -125,9 +174,11 @@ MatchRankView storedMatchRanks(Db& db, const std::string& matchId) {
     v.missing = total - v.known - v.unranked;
     if (v.missing < 0) v.missing = 0;
 
-    // The average is only offered when most of the table is known. Averaging
-    // three of ten and calling it "the average of the game" would be a lie.
-    if (steps.size() >= 6) {
+    // The average needs the whole table read, not the whole table ranked. Five
+    // players with a rank and five who never placed is a complete answer; five
+    // read and five unknown is not. Under three ranks there is nothing to
+    // average (PRD 3.3: the count always travels with the number).
+    if (v.missing == 0 && steps.size() >= 3) {
         int sum = 0;
         for (int s : steps) sum += s;
         int avg = sum / (int)steps.size();
@@ -140,6 +191,9 @@ MatchRankView storedMatchRanks(Db& db, const std::string& matchId) {
                  std::to_string(total) + " jugadores. Pulsa Actualizar rangos.";
     } else if (steps.empty()) {
         v.note = "Ninguno de los diez tiene clasificacion en esta cola.";
+    } else if (v.averageTier.empty()) {
+        v.note = "Solo " + std::to_string((int)steps.size()) +
+                 " de los diez tienen rango: son pocos para un promedio.";
     }
     return v;
 }
@@ -201,38 +255,64 @@ RankFetchResult refreshMatchRanks(Db& db, const std::string& matchId, const Riot
         if (onProgress) onProgress({ ++step, total, label });
     };
 
+    std::string regional = regionalHost(platform);
+
     for (size_t i = 0; i < targets.size(); ++i) {
         const Participant* p = targets[i];
         std::string err;
 
-        tick(p->championName + ": buscando invocador");
-        std::string body = apiGet(api, host, "/lol/summoner/v4/summoners/by-puuid/" + p->puuid,
-                                  &err);
-        if (spacingMs > 0) Sleep((DWORD)spacingMs);
-        std::string summonerId;
-        if (!body.empty()) {
-            try {
-                summonerId = json::parse(body).value("id", "");
-            } catch (...) {}
-        }
-        if (summonerId.empty()) {
+        // Step 1: the Riot ID becomes a puuid the API accepts.
+        //
+        // The puuid stored with a match comes from the client and is a 36
+        // character uuid, shaped like 8-4-4-4-12. The public API answers
+        // "Exception decrypting" for it: it wants its own value, 78 characters
+        // and no dashes. Measured 2026-09-07 against a live account; the two
+        // are different values, not two spellings of one.
+        // The Riot ID is the bridge, and match_json already carries it.
+        auto [gameName, tagLine] = splitRiotId(p->riotId);
+        if (gameName.empty() || tagLine.empty()) {
             ++res.failed;
-            if (res.message.empty() && !err.empty()) res.message = err;
-            // 403 and 429 will not fix themselves on the next player.
-            if (err.find("clave") != std::string::npos || err.find("cuota") != std::string::npos)
-                break;
+            if (res.message.empty())
+                res.message = "Una partida vieja no guardo el Riot ID de todos. "
+                              "Vuelve a importarla.";
             continue;
         }
 
+        tick(p->championName + ": buscando cuenta");
+        std::string accBody = apiGet(api, regional,
+                                     "/riot/account/v1/accounts/by-riot-id/" +
+                                     urlEncode(gameName) + "/" + urlEncode(tagLine), &err);
+        if (spacingMs > 0) Sleep((DWORD)spacingMs);
+        std::string apiPuuid;
+        if (!accBody.empty()) {
+            try {
+                apiPuuid = json::parse(accBody).value("puuid", "");
+            } catch (...) {}
+        }
+        if (apiPuuid.empty()) {
+            ++res.failed;
+            if (res.message.empty() && !err.empty()) res.message = err;
+            // An auth or quota error will not fix itself on the next player.
+            // Without this the run burned ten calls to learn the same thing
+            // ten times.
+            if (isFatal(err)) break;
+            continue;
+        }
+
+        // Step 2: the rank, in one call.
+        //
+        // Not summoner-v4 then league-v4/by-summoner: summoner-v4 no longer
+        // returns the encrypted summoner id at all. Measured the same day, its
+        // answer holds only profileIconId, puuid, revisionDate and
+        // summonerLevel, so that chain cannot be completed any more.
         tick(p->championName + ": leyendo rango");
         std::string entries = apiGet(api, host,
-                                     "/lol/league/v4/entries/by-summoner/" + summonerId, &err);
+                                     "/lol/league/v4/entries/by-puuid/" + apiPuuid, &err);
         if (spacingMs > 0 && i + 1 < targets.size()) Sleep((DWORD)spacingMs);
         if (entries.empty()) {
             ++res.failed;
             if (res.message.empty() && !err.empty()) res.message = err;
-            if (err.find("clave") != std::string::npos || err.find("cuota") != std::string::npos)
-                break;
+            if (isFatal(err)) break;
             continue;
         }
 
@@ -248,6 +328,8 @@ RankFetchResult refreshMatchRanks(Db& db, const std::string& matchId, const Riot
                 break;
             }
         } catch (...) {}
+        // The API puuid is used and dropped: it is an identity of another
+        // person and nothing here stores it (PRD 16, 29).
         // A player with no solo queue rank is stored too, with an empty tier:
         // "read and unranked" is an answer, and it stops a pointless re-read.
         db.upsertMatchRank(matchId, r);
