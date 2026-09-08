@@ -2176,6 +2176,110 @@ int main() {
         CHECK(none.byParticipant(1) == nullptr);
     }
 
+    // --- v4 lane/role -> v5 teamPosition (TASK-0029) -------------------------
+    {
+        // The exact shape the client answered for LA2_1622561091 on
+        // 2026-09-07. Two players a side arrive as lane JUNGLE role NONE, the
+        // support arrives as SUPPORT and not DUO_SUPPORT.
+        auto player = [](int pid, int team, const char* lane, const char* role,
+                         int spell1, int spell2, int neutral, int minions) {
+            json p;
+            p["participantId"] = pid;
+            p["teamId"] = team;
+            p["championId"] = 100 + pid;
+            p["spell1Id"] = spell1;
+            p["spell2Id"] = spell2;
+            p["timeline"]["lane"] = lane;
+            p["timeline"]["role"] = role;
+            p["stats"]["win"] = team == 100;
+            p["stats"]["neutralMinionsKilled"] = neutral;
+            p["stats"]["totalMinionsKilled"] = minions;
+            return p;
+        };
+        json game;
+        game["gameVersion"] = "16.17.702.1234";
+        game["gameDuration"] = 1307;
+        game["queueId"] = 400;
+        game["platformId"] = "LA2";
+        game["gameId"] = 1622561091LL;
+        game["participants"] = json::array({
+            player(1,  100, "JUNGLE", "NONE",    12, 4, 0,   133),
+            player(2,  100, "JUNGLE", "NONE",    4, 11, 110, 9),
+            player(3,  100, "MIDDLE", "SOLO",    4, 14, 20,  128),
+            player(4,  100, "BOTTOM", "CARRY",   7, 4,  0,   246),
+            player(5,  100, "BOTTOM", "SUPPORT", 4, 3,  0,   41),
+            player(6,  200, "JUNGLE", "NONE",    4, 3,  0,   158),
+            player(7,  200, "JUNGLE", "NONE",    11, 4, 132, 23),
+            player(8,  200, "MIDDLE", "SOLO",    4, 14, 10,  175),
+            player(9,  200, "BOTTOM", "CARRY",   7, 4,  0,   202),
+            player(10, 200, "BOTTOM", "SUPPORT", 4, 3,  0,   73),
+        });
+        game["participantIdentities"] = json::array();
+
+        json v5 = convertLcuGameToV5(game, nullptr);
+        auto m = parseMatch(v5.dump());
+        CHECK(m.has_value());
+        if (m) {
+            auto posOf = [&](int pid) {
+                const Participant* p = m->byId(pid);
+                return p ? p->position : std::string("<missing>");
+            };
+            // The player with Smite keeps the jungle; the other moves to top.
+            CHECK_EQ(posOf(1), std::string("TOP"));
+            CHECK_EQ(posOf(2), std::string("JUNGLE"));
+            CHECK_EQ(posOf(6), std::string("TOP"));
+            CHECK_EQ(posOf(7), std::string("JUNGLE"));
+            // SUPPORT, not DUO_SUPPORT: matching only the DUO_ name left the
+            // support labelled BOTTOM and UTILITY empty.
+            CHECK_EQ(posOf(5), std::string("UTILITY"));
+            CHECK_EQ(posOf(10), std::string("UTILITY"));
+            CHECK_EQ(posOf(4), std::string("BOTTOM"));
+            CHECK_EQ(posOf(3), std::string("MIDDLE"));
+
+            // Each side ends with the five positions, once each.
+            for (int team : {100, 200}) {
+                std::map<std::string, int> seen;
+                for (auto& p : m->participants)
+                    if (p.teamId == team) ++seen[p.position];
+                for (const char* pos : {"TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"})
+                    CHECK_EQ(seen[pos], 1);
+            }
+        }
+
+        // The old DUO_ spelling still works: an older payload must not break.
+        json legacy = game;
+        legacy["participants"][4]["timeline"]["role"] = "DUO_SUPPORT";
+        legacy["participants"][3]["timeline"]["role"] = "DUO_CARRY";
+        auto lm = parseMatch(convertLcuGameToV5(legacy, nullptr).dump());
+        CHECK(lm.has_value());
+        if (lm) {
+            CHECK_EQ(lm->byId(5)->position, std::string("UTILITY"));
+            CHECK_EQ(lm->byId(4)->position, std::string("BOTTOM"));
+        }
+
+        // A side that already has a top keeps it: the second jungle stays put
+        // rather than overwriting a position the client did label.
+        json withTop = game;
+        withTop["participants"][0]["timeline"]["lane"] = "TOP";
+        auto tm = parseMatch(convertLcuGameToV5(withTop, nullptr).dump());
+        CHECK(tm.has_value());
+        if (tm) {
+            CHECK_EQ(tm->byId(1)->position, std::string("TOP"));
+            CHECK_EQ(tm->byId(2)->position, std::string("JUNGLE"));
+        }
+
+        // With no Smite anywhere, the camps decide.
+        json noSmite = game;
+        noSmite["participants"][1]["spell1Id"] = 4;
+        noSmite["participants"][1]["spell2Id"] = 14;
+        auto nm = parseMatch(convertLcuGameToV5(noSmite, nullptr).dump());
+        CHECK(nm.has_value());
+        if (nm) {
+            CHECK_EQ(nm->byId(2)->position, std::string("JUNGLE"));   // 110 camps
+            CHECK_EQ(nm->byId(1)->position, std::string("TOP"));      // 0 camps
+        }
+    }
+
     // --- ipc frame roundtrip -----------------------------------------------
     {
         HANDLE rd = nullptr, wr = nullptr;
