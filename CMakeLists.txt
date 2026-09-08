@@ -49,6 +49,15 @@ target_link_libraries(RiftLoop.Capture PRIVATE riftloop_core windowsapp d3d11 dx
                       mfplat mfreadwrite mfuuid)
 target_compile_options(RiftLoop.Capture PRIVATE /await)
 
+# --- assets ------------------------------------------------------------------
+# Nine game icons that Data Dragon does not ship (assets/icons/SOURCE.md). They
+# sit next to the executable so the app reads them from disk and downloads
+# nothing.
+add_custom_target(riftloop_assets ALL
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          "${CMAKE_SOURCE_DIR}/assets" "$<TARGET_FILE_DIR:RiftLoop.Desktop>/assets")
+add_dependencies(RiftLoop.Desktop riftloop_assets)
+
 # --- tests -------------------------------------------------------------------
 enable_testing()
 file(GLOB TEST_SOURCES tests/*.cpp)
