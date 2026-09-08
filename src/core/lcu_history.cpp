@@ -3,6 +3,7 @@
 #include "core/util.h"
 
 #include <map>
+#include <vector>
 
 using nlohmann::json;
 
@@ -10,25 +11,104 @@ namespace rl {
 
 namespace {
 
+constexpr int kSmiteKey = 11;
+
 // v4 lane/role -> v5 teamPosition.
+//
+// Measured against the client on 2026-09-07, over three of the user's games:
+// the role of the support arrives as "SUPPORT", not "DUO_SUPPORT", and the
+// carry as "CARRY", not "DUO_CARRY". Matching only the DUO_ names left every
+// support labelled BOTTOM, which is why the table showed BOTTOM twice and
+// UTILITY never.
 std::string positionOf(const json& participant) {
     std::string lane, role;
     if (participant.contains("timeline")) {
         lane = participant["timeline"].value("lane", "");
         role = participant["timeline"].value("role", "");
     }
+    bool support = role == "SUPPORT" || role == "DUO_SUPPORT";
     if (lane == "TOP") return "TOP";
     if (lane == "JUNGLE") return "JUNGLE";
     if (lane == "MIDDLE" || lane == "MID") return "MIDDLE";
-    if (lane == "BOTTOM" || lane == "BOT") {
-        if (role == "DUO_SUPPORT") return "UTILITY";
-        return "BOTTOM";
-    }
-    if (role == "DUO_SUPPORT") return "UTILITY";
+    if (lane == "BOTTOM" || lane == "BOT") return support ? "UTILITY" : "BOTTOM";
+    if (support) return "UTILITY";
     return "";
 }
 
 } // namespace
+
+// Two positions arrive wrong from the client, and both are recoverable from
+// numbers that the converted payload keeps. Measured on 2026-09-07 over three
+// of the user's games.
+//
+// 1. The top laner is labelled JUNGLE. Every side had two players at
+//    lane=JUNGLE role=NONE:
+//
+//      pid 1  smite=false  neutral=0    minions=133   <- the top laner
+//      pid 2  smite=true   neutral=110  minions=9     <- the jungler
+//
+//    Of the players a side calls JUNGLE, the one carrying Smite keeps it and
+//    the other moves to TOP, when that side has no TOP. With no Smite at all,
+//    the most camps wins.
+//
+// 2. A payload converted before the SUPPORT fix has two BOTTOM a side. The
+//    support is the one with far less farm: 246 cs against 41 in that game.
+//
+// Both are heuristics over broken fields, written here and not hidden in a
+// view. A side that already reads correctly is left alone.
+int repairPositionsV5(json& participants) {
+    int moved = 0;
+    auto smite = [](const json& p) {
+        return p.value("summoner1Id", 0) == kSmiteKey ||
+               p.value("summoner2Id", 0) == kSmiteKey;
+    };
+    auto farm = [](const json& p) {
+        return p.value("totalMinionsKilled", 0) + p.value("neutralMinionsKilled", 0);
+    };
+
+    for (int teamId : {100, 200}) {
+        std::vector<json*> jungle, bottom;
+        bool hasTop = false, hasUtility = false;
+        for (auto& p : participants) {
+            if (p.value("teamId", 0) != teamId) continue;
+            std::string pos = p.value("teamPosition", "");
+            if (pos == "TOP") hasTop = true;
+            if (pos == "UTILITY") hasUtility = true;
+            if (pos == "JUNGLE") jungle.push_back(&p);
+            if (pos == "BOTTOM") bottom.push_back(&p);
+        }
+
+        if (jungle.size() >= 2) {
+            json* keep = nullptr;
+            for (json* p : jungle)
+                if (smite(*p)) { keep = p; break; }
+            if (!keep)
+                for (json* p : jungle)
+                    if (!keep || p->value("neutralMinionsKilled", 0) >
+                                 keep->value("neutralMinionsKilled", 0))
+                        keep = p;
+            for (json* p : jungle) {
+                // Only one player fills an empty TOP. A third one stays as it
+                // came: a guess repeated is not more true.
+                if (p == keep || hasTop) continue;
+                (*p)["teamPosition"] = "TOP";
+                hasTop = true;
+                ++moved;
+            }
+        }
+
+        if (bottom.size() >= 2 && !hasUtility) {
+            json* support = nullptr;
+            for (json* p : bottom)
+                if (!support || farm(*p) < farm(*support)) support = p;
+            if (support) {
+                (*support)["teamPosition"] = "UTILITY";
+                ++moved;
+            }
+        }
+    }
+    return moved;
+}
 
 json convertLcuGameToV5(const json& g, const Ddragon* dd) {
     json info;
@@ -100,6 +180,7 @@ json convertLcuGameToV5(const json& g, const Ddragon* dd) {
         }
         participants.push_back(std::move(v5));
     }
+    repairPositionsV5(participants);
     info["participants"] = std::move(participants);
 
     std::string platform = g.value("platformId", "");
