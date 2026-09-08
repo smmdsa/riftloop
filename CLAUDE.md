@@ -190,8 +190,8 @@ es Win32 puro (WinUI 3 pendiente) y no hay C++/WinRT todavía.
 
 ## Git: el trabajo entra por rama y PR
 
-El repositorio es publico: <https://github.com/smmdsa/riftloop>. **`main` no acepta un
-push directo.** Todo cambio entra por una rama y un pull request, y lo aprueba el usuario.
+El repositorio es público: <https://github.com/smmdsa/riftloop>. **`main` no debe aceptar un
+push directo (protege la rama en la configuración de GitHub).** Todo cambio entra por una rama y un pull request, y lo aprueba el usuario.
 
 ```bash
 git checkout -b <area>/<lo-que-hace>     # ep-03/mapa-de-calor, fix/clip-desalineado
