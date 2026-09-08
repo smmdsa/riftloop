@@ -188,6 +188,32 @@ Los presets están en `CMakePresets.json` (`x64-debug`, `x64-release`). La suite
 ejecutable con macros `CHECK`; no hay gtest. Deuda conocida frente al PRD §14.1: el Desktop
 es Win32 puro (WinUI 3 pendiente) y no hay C++/WinRT todavía.
 
+## Git: el trabajo entra por rama y PR
+
+El repositorio es público: <https://github.com/smmdsa/riftloop>. **`main` no debe aceptar un
+push directo (protege la rama en la configuración de GitHub).** Todo cambio entra por una rama y un pull request, y lo aprueba el usuario.
+
+```bash
+git checkout -b <area>/<lo-que-hace>     # ep-03/mapa-de-calor, fix/clip-desalineado
+# ... trabajo, y la suite en verde antes de commitear ...
+git push -u origin <rama>
+gh pr create --base main --title "..." --body "..."
+```
+
+El nombre de la rama empieza por el área (`ep-03`, `draft`, `clips`, `docs`, `fix`, `flujo`)
+y sigue con lo que hace, en minúsculas y con guiones. Un commit por cambio lógico, y el
+cuerpo explica por qué, no qué.
+
+**Antes de abrir el PR, la suite pasa entera.** El numero de checks va en el cuerpo del PR.
+Un PR que no dice cuantos checks corrio no se mira.
+
+**El repositorio es publico, asi que nada personal entra en un commit.** Ni el nick de
+invocador, ni una ruta con el nombre de usuario de Windows, ni una clave de la API de Riot,
+ni un puuid ajeno. Un fixture de una partida real se exporta con `--export-fixture`, que
+anonimiza al escribir. `docs/sha-map.md` guarda el mapa de SHA de la unica reescritura del
+historial, la del 2026-09-07, que quito esos datos antes de publicar.
+
+
 ## Arquitectura: seis procesos, un agente que orquesta
 
 El cliente **nunca** es un proceso único. §14.2 define la topología. Cada proceso existe para aislar
