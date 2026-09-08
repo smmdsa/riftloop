@@ -611,6 +611,10 @@ int ranksReport(Db& db, const std::string& idArg, bool refresh, bool force, int 
 // payload keeps, so nothing is asked of Riot again.
 int repairPositions(Db& db) {
     int matches = 0, moved = 0, touched = 0;
+    // Once, not per match: resolveUserPuuid parses up to thirty stored matches
+    // when the profile has no puuid yet, and the answer does not change while
+    // this runs.
+    const std::string puuid = resolveUserPuuid(db);
     for (auto& row : db.listMatches(1000)) {
         std::string raw = db.matchJson(row.matchId);
         if (raw.empty()) continue;
@@ -628,10 +632,11 @@ int repairPositions(Db& db) {
         moved += n;
         ++touched;
 
-        // The user columns of the row carry the old position too.
-        std::string puuid = resolveUserPuuid(db);
+        // The user columns of the row carry the old position too. With no
+        // puuid there is nobody to look for, so the match is not parsed again.
+        if (puuid.empty()) continue;
         if (auto m = parseMatch(j.dump()))
-            if (const Participant* me = puuid.empty() ? nullptr : m->byPuuid(puuid))
+            if (const Participant* me = m->byPuuid(puuid))
                 db.updateMatchUser(row.matchId, me->championName, me->position, me->win);
     }
     std::printf("%d partidas revisadas, %d corregidas, %d jugadores movidos.\n",
