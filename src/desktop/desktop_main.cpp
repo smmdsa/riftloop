@@ -69,6 +69,7 @@ enum : int {
     // matches
     IDC_MATCH_LIST = 1200, IDC_MATCH_OPEN, IDC_MATCH_REFRESH, IDC_MATCH_FETCH,
     IDC_RANKS_VIEW, IDC_RANKS_FETCH, IDC_RANKS_ONE, IDC_RANKS_FORCE,
+    IDC_QFILTER0 = 1240,             // ..1245, one per queue family
     // postmatch
     IDC_POST_VIEW = 1300, IDC_FB_OK, IDC_FB_PARTIAL, IDC_FB_WRONG, IDC_FB_CTX,
     IDC_ACCEPT_MISSION,
@@ -99,6 +100,9 @@ enum : int {
 
 constexpr UINT WM_APP_IPC = WM_APP + 10;
 constexpr UINT WM_APP_CLIPS = WM_APP + 11;      // wParam: 1 progress, 2 done
+// A background call to Riot reporting in. wParam is NetState, lParam is a
+// std::wstring* the UI thread takes ownership of and deletes.
+constexpr UINT WM_APP_NET = WM_APP + 12;
 // PRD 13.4: full recordings are capped at 2 GB of local storage.
 constexpr int64_t kRecordingQuotaBytes = 2LL * 1024 * 1024 * 1024;
 constexpr int kPages = 9;
@@ -130,6 +134,8 @@ struct App {
     int currentPage = 0;
     int  heatMatches = 20;      // how many matches the heat map reads
     int  curveIndex = 0;        // which stored match the curve page shows
+    int  queueFilter = 0;       // index into kQueueFilters; 0 = every queue
+    std::string profileTier;    // tier drawn beside the rank on the profile page
     bool heatRoleOnly = false;
 
     std::unique_ptr<Db> db;
@@ -145,6 +151,13 @@ struct App {
 
     std::unique_ptr<ipc::Client> client;
     std::string agentState = "sin agente";
+    // What a background call to Riot is doing right now. Written only by the
+    // UI thread, from WM_APP_NET, so no lock is needed to read it while
+    // painting.
+    enum class NetState { Idle, Working, Ok, Failed };
+    NetState     netState = NetState::Idle;
+    std::wstring netText;
+    int64_t      netUntilMs = 0;     // when a finished message stops showing
 
     // Draft mirrored from the agent. Bans and the pickable set have no combo of
     // their own, so the Draft Lab keeps them here for a manual recompute.
@@ -201,6 +214,18 @@ std::string n(HWND ctl) {
 }
 HWND ctl(int id) { return GetDlgItem(g->hwnd, id); }
 void setText(int id, const std::string& utf8) { SetWindowTextW(ctl(id), w(utf8).c_str()); }
+
+void status(const std::string& msg, App::NetState state = App::NetState::Ok) {
+    setText(IDC_PROFILE_STATUS, msg);
+    if (!g || !g->hwnd) return;
+    g->netState = state;
+    g->netText = w(msg);
+    if (state != App::NetState::Working) {
+        g->netUntilMs = (int64_t)GetTickCount64() + 8000;
+        SetTimer(g->hwnd, 1, 8200, nullptr);
+    }
+    InvalidateRect(g->hwnd, nullptr, FALSE);
+}
 
 std::string champDisplay(const std::string& id) {
     if (g->ddOk)
@@ -786,6 +811,39 @@ std::vector<RVItem> rvSettingsInfo() {
 
 // ------------------------------------------------------------- page refresh
 
+// The queue filters of the match list. Mixing ranked, normals and ARAM in one
+// list hides what the reader came for, and the project already keeps those
+// samples apart everywhere else (PRD 13.3, queueFamilyOf).
+struct QueueFilter {
+    const wchar_t* label;
+    const char*    queue;     // exact MatchRow::queue; "" = everything
+};
+const QueueFilter kQueueFilters[] = {
+    {L"Todas",        ""},
+    {L"Clasificatoria", "RANKED_SOLO_5x5"},
+    {L"Flex",         "RANKED_FLEX"},
+    {L"Normal",       "NORMAL_DRAFT"},
+    {L"Ciega",        "NORMAL_BLIND"},
+    {L"ARAM",         "ARAM"},
+};
+constexpr int kQueueFilterCount = (int)(sizeof(kQueueFilters) / sizeof(kQueueFilters[0]));
+
+bool matchesQueueFilter(const std::string& queue, int filter) {
+    if (filter <= 0 || filter >= kQueueFilterCount) return true;
+    return queue == kQueueFilters[filter].queue;
+}
+
+// TOP, JUNGLE, MIDDLE, BOTTOM, UTILITY. Anything the payload does not label
+// goes last, keeping the order it arrived in.
+int roleOrder(const std::string& position) {
+    if (position == "TOP") return 0;
+    if (position == "JUNGLE") return 1;
+    if (position == "MIDDLE") return 2;
+    if (position == "BOTTOM") return 3;
+    if (position == "UTILITY") return 4;
+    return 5;
+}
+
 // The match highlighted in the list. Empty when nothing is selected.
 std::string selectedMatchId();
 
@@ -793,6 +851,156 @@ std::string selectedMatchId() {
     int sel = ListView_GetNextItem(ctl(IDC_MATCH_LIST), -1, LVNI_SELECTED);
     if (sel < 0 || sel >= (int)g->matchRowIds.size()) return {};
     return g->matchRowIds[sel];
+}
+
+// --- the tips of one player row -------------------------------------------
+// Each column explains itself. Everything below reads Data Dragon, which is
+// already cached and already in the language of the client.
+
+RVTip tierTip(const rl::RivalRank* r) {
+    RVTip t;
+    if (!r || !r->cached()) {
+        t.title = L"Rango sin leer";
+        t.subtitle = L"Riot no ha respondido por este jugador todavía";
+        TipLine how;
+        how.label = L"Pulsa \"Rangos de esta partida\" para pedirlo";
+        t.lines.push_back(std::move(how));
+        t.footer = L"Necesita tu clave de Riot en Ajustes. Son dos llamadas por jugador, "
+                   L"espaciadas para no agotar la cuota.";
+        return t;
+    }
+    if (!r->ranked()) {
+        t.title = L"Sin clasificar";
+        t.subtitle = L"Este jugador no tiene rango en clasificatoria en solitario";
+        return t;
+    }
+    t.title = w(r->tier) + (r->division.empty() ? L"" : L" " + w(r->division));
+    t.subtitle = std::to_wstring(r->leaguePoints) + L" LP";
+    t.footer = L"Tier y división oficiales de Riot, tal cual. No se deriva ninguna "
+               L"puntuación de ellos.";
+    return t;
+}
+
+RVTip itemTip(int itemId) {
+    RVTip t;
+    if (itemId <= 0 || !g->ddOk) return t;
+    const ItemInfo* info = g->dd.item(itemId);
+    if (!info) return t;
+    t.title = w(info->name);
+    if (info->totalGold > 0)
+        t.subtitle = std::to_wstring(info->totalGold) + L" de oro";
+    if (!info->summary.empty()) {
+        TipLine l;
+        l.label = w(info->summary);
+        t.lines.push_back(std::move(l));
+    }
+    if (!info->detail.empty()) t.footer = w(info->detail);
+    return t;
+}
+
+RVTip spellTip(int key) {
+    RVTip t;
+    if (key <= 0 || !g->ddOk) return t;
+    std::string name = g->dd.summonerNameByKey(key);
+    if (name.empty()) return t;
+    t.title = w(name);
+    t.subtitle = L"Hechizo de invocador";
+    return t;
+}
+
+// The whole tree of a style, with the rune the player took framed. A single
+// icon says nothing; the tree says "this one, out of these".
+RVTip runeTreeTip(int styleId, const std::vector<int>& perks, int chosenPerk) {
+    RVTip t;
+    if (styleId <= 0 || !g->ddOk) return t;
+    t.title = w(g->dd.styleName(styleId));
+    if (chosenPerk > 0) t.subtitle = w(g->dd.perkName(chosenPerk));
+    for (const auto& style : g->dd.runeStyles()) {
+        if (style.id != styleId) continue;
+        for (const auto& slot : style.slots) {
+            RVTip::TreeRow row;
+            for (int perkId : slot) {
+                row.iconUrls.push_back(g->dd.perkIconUrl(perkId));
+                row.names.push_back(w(g->dd.perkName(perkId)));
+                if (std::find(perks.begin(), perks.end(), perkId) != perks.end())
+                    row.chosen = (int)row.iconUrls.size() - 1;
+            }
+            t.tree.push_back(std::move(row));
+        }
+        break;
+    }
+    t.footer = L"La runa que eligió está enmarcada; las demás son las que había en esa fila.";
+    return t;
+}
+
+RVTip kdaTip(const Participant& p) {
+    RVTip t;
+    t.title = L"Asesinatos / muertes / asistencias";
+    t.subtitle = w(champDisplay(p.championName));
+    auto line = [&](const wchar_t* label, int v) {
+        TipLine l;
+        l.label = label;
+        l.value = std::to_wstring(v);
+        t.lines.push_back(std::move(l));
+    };
+    line(L"Asesinatos", p.kills);
+    line(L"Muertes", p.deaths);
+    line(L"Asistencias", p.assists);
+    TipLine ratio;
+    ratio.label = L"Por muerte (K+A)/D";
+    // No deaths means the ratio has no denominator. "Perfecto" is the honest
+    // word for it; a division by one would be a made-up number.
+    ratio.value = p.deaths > 0
+                ? w(std::to_string((p.kills + p.assists) * 10 / p.deaths / 10) + "." +
+                    std::to_string((p.kills + p.assists) * 10 / p.deaths % 10))
+                : L"perfecto";
+    t.lines.push_back(std::move(ratio));
+    return t;
+}
+
+RVTip farmTip(const Participant& p, int durationSec) {
+    RVTip t;
+    t.title = L"Nivel, súbditos y oro";
+    double minutes = durationSec > 0 ? durationSec / 60.0 : 1.0;
+    auto line = [&](const wchar_t* label, const std::wstring& value) {
+        TipLine l;
+        l.label = label;
+        l.value = value;
+        t.lines.push_back(std::move(l));
+    };
+    auto perMin = [&](int total) {
+        wchar_t buf[32];
+        swprintf(buf, 32, L"%.1f por minuto", total / minutes);
+        return std::wstring(buf);
+    };
+    line(L"Nivel al acabar", std::to_wstring(p.champLevel));
+    line(L"Súbditos", std::to_wstring(p.totalCs));
+    line(L"  ", perMin(p.totalCs));
+    line(L"Oro ganado", std::to_wstring(p.goldEarned));
+    line(L"  ", perMin(p.goldEarned));
+    t.footer = L"Súbditos incluye los de línea y los de jungla, como en el marcador "
+               L"del cliente.";
+    return t;
+}
+
+RVTip playerTip(const Participant& p, bool isUser) {
+    RVTip t;
+    t.title = w(champDisplay(p.championName));
+    t.subtitle = p.riotId.empty() ? L"" : w(p.riotId);
+    TipLine pos;
+    pos.label = L"Posición";
+    pos.value = p.position.empty() ? L"sin registrar" : w(p.position);
+    t.lines.push_back(std::move(pos));
+    TipLine side;
+    side.label = L"Equipo";
+    side.value = p.teamId == 100 ? L"azul" : L"rojo";
+    t.lines.push_back(std::move(side));
+    TipLine res;
+    res.label = L"Resultado";
+    res.value = p.win ? L"victoria" : L"derrota";
+    t.lines.push_back(std::move(res));
+    if (isUser) t.footer = L"Esta fila eres tú.";
+    return t;
 }
 
 // The ten ranks of one match already played, with how many are still unread.
@@ -822,6 +1030,18 @@ std::vector<RVItem> rvMatchRanks(const std::string& matchId) {
                       : L"La partida, jugador a jugador  ·  promedio " + w(rv.averageTier) +
                         L" " + w(rv.averageDivision);
     v.push_back({RVKind::Section, head});
+    // A header, because "3 / 6 / 5" and "niv 18 · 244 CS · 11.3k" name nothing
+    // on their own.
+    {
+        RVItem hdr;
+        hdr.kind = RVKind::PlayerRow;
+        hdr.text = L"Campeón · invocador";
+        hdr.kda = L"K / D / A";
+        hdr.farm = L"nivel · CS · oro";
+        hdr.place = L"Puesto";
+        hdr.color = theme::kBorder;
+        v.push_back(std::move(hdr));
+    }
 
     for (int side = 0; side < 2; ++side) {
         int teamId = side == 0 ? 100 : 200;
@@ -835,8 +1055,17 @@ std::vector<RVItem> rvMatchRanks(const std::string& matchId) {
         header.color = won ? theme::kGood : theme::kDanger;
         v.push_back(std::move(header));
 
-        for (auto& p : match->participants) {
-            if (p.teamId != teamId) continue;
+        // Ordered by lane, not by the order the payload happened to use.
+        std::vector<const Participant*> sideLine;
+        for (auto& p : match->participants)
+            if (p.teamId == teamId) sideLine.push_back(&p);
+        std::stable_sort(sideLine.begin(), sideLine.end(),
+                         [](const Participant* a, const Participant* b) {
+                             return roleOrder(a->position) < roleOrder(b->position);
+                         });
+
+        for (const Participant* pp : sideLine) {
+            const Participant& p = *pp;
             const RivalRank* r = rv.byParticipant(p.participantId);
             RVItem it;
             it.kind = RVKind::PlayerRow;
@@ -844,8 +1073,11 @@ std::vector<RVItem> rvMatchRanks(const std::string& matchId) {
             it.iconId = p.championName;
             it.iconUrl = g->ddOk ? g->dd.championIconUrl(p.championName) : "";
             bool isUser = !userPuuid.empty() && p.puuid == userPuuid;
+            it.role = p.position;
+            // The name of a game already played. In champion select the enemy
+            // is anonymised and this would be red (PRD 17.2); here it is not.
             it.text = w(champDisplay(p.championName)) +
-                      (p.position.empty() ? L"" : L" · " + w(p.position)) +
+                      (p.riotId.empty() ? L"" : L" · " + w(p.riotId)) +
                       (isUser ? L"  (tú)" : L"");
             it.kda = w(std::to_string(p.kills) + " / " + std::to_string(p.deaths) + " / " +
                        std::to_string(p.assists));
@@ -860,6 +1092,7 @@ std::vector<RVItem> rvMatchRanks(const std::string& matchId) {
             // separates what the player chose before the game from what they
             // built during it.
             for (int spell : p.summonerSpells) {
+                it.chipTips.push_back(spellTip(spell));
                 RVChip c;
                 c.kind = "spell";
                 // The payload carries the numeric key. summonerNameByKey gives
@@ -871,6 +1104,7 @@ std::vector<RVItem> rvMatchRanks(const std::string& matchId) {
                 it.chips.push_back(std::move(c));
             }
             for (int style : {p.perkPrimaryStyle, p.perkSubStyle}) {
+                it.chipTips.push_back(runeTreeTip(style, p.perks, 0));
                 RVChip c;
                 c.kind = "perk";
                 if (style > 0 && g->ddOk) {
@@ -880,6 +1114,7 @@ std::vector<RVItem> rvMatchRanks(const std::string& matchId) {
                 it.chips.push_back(std::move(c));
             }
             if (!p.perks.empty() && g->ddOk) {
+                it.chipTips.push_back(runeTreeTip(p.perkPrimaryStyle, p.perks, p.perks[0]));
                 RVChip key;   // the keystone, the one rune that shapes the build
                 key.kind = "perk";
                 key.id = std::to_string(p.perks[0]);
@@ -888,6 +1123,7 @@ std::vector<RVItem> rvMatchRanks(const std::string& matchId) {
             }
             it.chipGap = (int)it.chips.size();
             for (int item : p.finalItems) {
+                it.chipTips.push_back(itemTip(item));
                 RVChip c;
                 c.kind = "item";
                 if (item > 0 && g->ddOk) {
@@ -897,35 +1133,42 @@ std::vector<RVItem> rvMatchRanks(const std::string& matchId) {
                 it.chips.push_back(std::move(c));
             }
 
+            if (r && r->ranked()) it.tier = r->tier;
+            it.tierRead = r && r->cached();
+            it.tipTier = tierTip(r);
+            it.tipName = playerTip(p, isUser);
+            it.tipKda = kdaTip(p);
+            it.tipFarm = farmTip(p, match->gameDurationSec);
+
             if (const PodiumEntry* e = podium.byParticipant(p.participantId)) {
                 it.place = std::to_wstring(e->rank) + L"º";
                 it.title2 = w(e->title);
                 if (r) it.right = w(r->display());
 
                 // The tip: every factor, its numbers, and the points it gave.
-                it.tipTitle = std::to_wstring(e->rank) + L"º de 10 · " +
-                              w(champDisplay(p.championName));
-                it.tipSubtitle = e->title.empty()
-                               ? L"Puntuación de la partida: " + std::to_wstring(e->score) +
-                                 L" sobre 100"
-                               : w(e->title) + L" · " + w(e->titleWhy);
+                it.tipPlace.title = std::to_wstring(e->rank) + L"º de 10 · " +
+                                    w(champDisplay(p.championName));
+                it.tipPlace.subtitle = e->title.empty()
+                                     ? L"Puntuación de la partida: " +
+                                       std::to_wstring(e->score) + L" sobre 100"
+                                     : w(e->title) + L" · " + w(e->titleWhy);
                 for (const auto& f : e->factors) {
                     TipLine line;
                     line.label = w(f.label);
                     line.value = std::to_wstring(f.points) + L" / " + std::to_wstring(f.weight);
                     line.bar = f.weight > 0 ? f.points * 100 / f.weight : 0;
-                    it.tipLines.push_back(std::move(line));
+                    it.tipPlace.lines.push_back(std::move(line));
                     TipLine detail;
                     detail.label = L"      " + w(f.detail);
-                    it.tipLines.push_back(std::move(detail));
+                    it.tipPlace.lines.push_back(std::move(detail));
                 }
                 TipLine total;
                 total.label = L"Total";
                 total.value = std::to_wstring(e->score) + L" / 100";
                 total.bar = e->score;
-                it.tipLines.push_back(std::move(total));
-                it.tipFooter = L"Mide esta partida, no al jugador. No se guarda y no se "
-                               L"compara con otras partidas.";
+                it.tipPlace.lines.push_back(std::move(total));
+                it.tipPlace.footer = L"Mide esta partida, no al jugador. No se guarda y "
+                                     L"no se compara con otras partidas.";
             }
             v.push_back(std::move(it));
         }
@@ -953,7 +1196,8 @@ void refreshMatchList() {
     std::map<std::string, int> iconIdx;
     g->matchRowIds.clear();
     int i = 0;
-    for (auto& r : g->db->listMatches(50)) {
+    for (auto& r : g->db->listMatches(200)) {
+        if (!matchesQueueFilter(r.queue, g->queueFilter)) continue;
         LVITEMW item{};
         item.mask = LVIF_TEXT | LVIF_IMAGE | LVIF_PARAM;
         item.iItem = i;
@@ -1006,6 +1250,16 @@ void refreshMatchList() {
     ListView_EnsureVisible(lv, row, FALSE);
 }
 
+void refreshQueueFilter() {
+    for (int i = 0; i < kQueueFilterCount; ++i)
+        InvalidateRect(ctl(IDC_QFILTER0 + i), nullptr, TRUE);
+    refreshMatchList();
+    rvSet(ctl(IDC_RANKS_VIEW), rvMatchRanks(selectedMatchId()));
+    setText(IDC_PROFILE_STATUS,
+            std::to_string(g->matchRowIds.size()) + " partidas en " +
+            util::narrow(kQueueFilters[g->queueFilter].label) + ".");
+}
+
 void refreshProfileUi() {
     Profile p = g->db->loadProfile();
 
@@ -1015,6 +1269,8 @@ void refreshProfileUi() {
     rankLcu.connect(Config::load().leagueLockfilePath);
     RankView rank = currentRankView(*g->db, rankLcu.connected() ? &rankLcu : nullptr);
     setText(IDC_RANK_LABEL, rank.known ? rank.rank.display() + "   " + rank.note : rank.note);
+    g->profileTier = rank.known && rank.rank.ranked() ? rank.rank.tier : std::string();
+    InvalidateRect(g->hwnd, nullptr, FALSE);
 
     setText(IDC_RIOTID, p.riotId.empty() ? "(se detecta del cliente de League)" : p.riotId);
     g->modeAprender = p.mode == AppMode::Aprender;
@@ -1127,13 +1383,13 @@ void saveProfileFromUi() {
     std::string second = comboRole(IDC_ROLE_SECOND, true);
     if (!second.empty()) p.preferredRoles.push_back(second);
     g->db->saveProfile(p);
-    setText(IDC_PROFILE_STATUS, "Perfil guardado.");
+    status("Perfil guardado.");
 }
 
 void addPoolEntry() {
     std::string champ = comboChampId(IDC_POOL_CHAMP);
     if (champ.empty()) {
-        setText(IDC_PROFILE_STATUS, "Elige un campeón en el desplegable.");
+        status("Elige un campeón en el desplegable.");
         return;
     }
     Profile p = g->db->loadProfile();
@@ -1148,7 +1404,7 @@ void addPoolEntry() {
     p.pool.push_back(e);
     g->db->saveProfile(p);
     refreshProfileUi();
-    setText(IDC_PROFILE_STATUS, champDisplay(champ) + " añadido al pool.");
+    status(champDisplay(champ) + " añadido al pool.");
 }
 
 void removePoolEntry() {
@@ -1201,7 +1457,7 @@ void suggestPoolFromHistory() {
     }
     g->db->saveProfile(p);
     refreshProfileUi();
-    setText(IDC_PROFILE_STATUS, std::to_string(added) +
+    status(std::to_string(added) +
                                 " campeones añadidos desde tu historial. Ajusta niveles si quieres.");
 }
 
@@ -1236,13 +1492,13 @@ void importJsonFiles() {
         if (m && g->db->upsertMatch(*m, pair->matchJson, pair->timelineJson)) ++ok;
         else ++skip;
     }
-    setText(IDC_PROFILE_STATUS, std::to_string(ok) + " partidas importadas, " +
+    status(std::to_string(ok) + " partidas importadas, " +
                                 std::to_string(skip) + " omitidas. Pulsa 'Analizar pendientes'.");
     refreshMatchList();
 }
 
 void runAnalysis() {
-    setText(IDC_PROFILE_STATUS, "Analizando...");
+    status("Analizando...");
     EnableWindow(ctl(IDC_ANALYZE), FALSE);
     std::thread([] {
         int done = 0;
@@ -1256,7 +1512,7 @@ void runAnalysis() {
 
 void runFetch() {
     // Client history + analysis in one click (also covers Alt+F4 games).
-    setText(IDC_PROFILE_STATUS, "Buscando partidas nuevas en el cliente de League...");
+    status("Buscando partidas nuevas en el cliente de League...");
     EnableWindow(ctl(IDC_FETCH_API), FALSE);
     EnableWindow(ctl(IDC_MATCH_FETCH), FALSE);
     std::thread([] {
@@ -1439,7 +1695,7 @@ void applyRunesToClient() {
                                        g->db->getKv("rune_write_signature"), g->dd);
 
     if (plan.action == WriteAction::NoChange) {
-        setText(IDC_PROFILE_STATUS, "La página ya estaba aplicada; no se tocó nada.");
+        status("La página ya estaba aplicada; no se tocó nada.");
         return;
     }
     bool force = false;
@@ -1467,7 +1723,7 @@ void applyRunesToClient() {
             return;
     }
     WriteResult r = applyRunePage(*g->db, lcu, g->dd, g->lastRunePage, pageName, force);
-    setText(IDC_PROFILE_STATUS, r.message);
+    status(r.message);
     MessageBoxW(g->hwnd, w(r.message).c_str(), L"RiftLoop",
                 MB_OK | (r.ok ? MB_ICONINFORMATION : MB_ICONWARNING));
 }
@@ -1485,7 +1741,7 @@ void undoRunesInClient() {
         return;
     }
     WriteResult r = undoRunePage(*g->db, lcu);
-    setText(IDC_PROFILE_STATUS, r.message);
+    status(r.message);
     MessageBoxW(g->hwnd, w(r.message).c_str(), L"RiftLoop",
                 MB_OK | (r.ok ? MB_ICONINFORMATION : MB_ICONWARNING));
 }
@@ -1766,12 +2022,12 @@ void pruneRecordings() {
                                             {"files_planned", (int)doomed.size()},
                                             {"freed_bytes", freed}}
                                            .dump());
-    std::string status = std::to_string(recFiles) + " grabaciones y " +
-                         std::to_string(clipFiles) + " clips borrados.";
+    std::string summary = std::to_string(recFiles) + " grabaciones y " +
+                          std::to_string(clipFiles) + " clips borrados.";
     if (removed < (int)doomed.size())
-        status += " " + std::to_string((int)doomed.size() - removed) +
-                  " archivo(s) siguen en disco: estaban en uso.";
-    setText(IDC_PROFILE_STATUS, status);
+        summary += " " + std::to_string((int)doomed.size() - removed) +
+                   " archivo(s) siguen en disco: estaban en uso.";
+    status(summary);
     refreshSettings();
     if (g->currentPage == 2) refreshClipList();
 }
@@ -1796,7 +2052,7 @@ void giveFeedback(const char* label) {
     g->db->saveFeedback(g->currentMatchId, detector, label, "");
     g->db->recordActivity(util::todayLocal(), "evidence_reviewed");
     g->db->addXp(5, "feedback de diagnóstico");
-    setText(IDC_PROFILE_STATUS, "Feedback registrado: " + std::string(label));
+    status("Feedback registrado: " + std::string(label));
     MessageBoxW(g->hwnd, L"Feedback registrado. Se usa para calibrar, no reentrena modelos.",
                 L"RiftLoop", MB_OK | MB_ICONINFORMATION);
 }
@@ -2111,8 +2367,10 @@ void buildPages() {
     mk(0, L"STATIC", L"Riot ID", WS_VISIBLE, X, Y, 90, 20, 0);
     // The rank goes on the identity row, right of the save button. The rows
     // below it are already taken, and it belongs next to the Riot ID.
-    mk(0, L"STATIC", L"", WS_VISIBLE, X + 880, Y + 24, 390, 22, IDC_RANK_LABEL);
-    mk(0, L"EDIT", L"", WS_VISIBLE | WS_BORDER, X, Y + 22, 240, 26, IDC_RIOTID);
+    mk(0, L"STATIC", L"", WS_VISIBLE | SS_OWNERDRAW, X + 860, Y + 16, 420, 40,
+       IDC_RANK_LABEL);
+    mk(0, L"EDIT", L"", WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, X, Y + 22, 240, 26,
+       IDC_RIOTID);
     mk(0, L"STATIC", L"Modo", WS_VISIBLE, X + 260, Y, 90, 20, 0);
     mkButton(0, L"Escalar", X + 260, Y + 22, 100, 26, IDC_MODE_ESCALAR);
     mkButton(0, L"Aprender", X + 362, Y + 22, 100, 26, IDC_MODE_APRENDER);
@@ -2159,8 +2417,18 @@ void buildPages() {
     mk(0, L"STATIC", L"", WS_VISIBLE, X, Y + 448, W, 44, IDC_PROFILE_STATUS);
 
     // ---- 1: Partidas -------------------------------------------------------
-    HWND ml = mk(1, WC_LISTVIEWW, L"", WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SINGLESEL, X, Y,
-                 W, 400, IDC_MATCH_LIST);
+    {
+        int qx = X;
+        for (int i = 0; i < kQueueFilterCount; ++i) {
+            int wq = 8 * (int)wcslen(kQueueFilters[i].label) + 34;
+            // On the content line, not above it: Y - 36 sat on the page
+            // subtitle that paintChrome draws.
+            mkButton(1, kQueueFilters[i].label, qx, Y, wq, 26, IDC_QFILTER0 + i);
+            qx += wq + 6;
+        }
+    }
+    HWND ml = mk(1, WC_LISTVIEWW, L"", WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SINGLESEL, X,
+                 Y + 34, W, 366, IDC_MATCH_LIST);
     addListViewColumns(ml, {{L"Campeón", 170}, {L"Rol", 90}, {L"Resultado", 90},
                             {L"KDA", 110}, {L"CS", 70}, {L"Oro", 80},
                             {L"Duración", 85}, {L"Parche", 70}, {L"Estado", 100}});
@@ -2280,14 +2548,18 @@ void buildPages() {
        WS_VISIBLE | BS_AUTOCHECKBOX, X, Y + 178, 420, 26, IDC_SET_KEEPFULL);
     mk(8, L"STATIC", L"Ruta del lockfile (vacío = autodetectar)", WS_VISIBLE, X, Y + 40, 280, 22,
        0);
-    mk(8, L"EDIT", L"", WS_VISIBLE | WS_BORDER, X + 290, Y + 38, 380, 26, IDC_SET_LOCKFILE);
+    mk(8, L"EDIT", L"", WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, X + 290, Y + 38, 380, 26,
+       IDC_SET_LOCKFILE);
     // The Riot key. It never lands in a file of this repository and never in
     // plain text: Config::saveApiKey seals it with DPAPI, so only this Windows
     // account can read it back (PRD 16, 21.2, 29).
     mk(8, L"STATIC", L"Clave de Riot (opcional, para el rango de los rivales)", WS_VISIBLE,
        X + 760, Y, 420, 22, 0);
-    mk(8, L"EDIT", L"", WS_VISIBLE | WS_BORDER | ES_PASSWORD, X + 760, Y + 24, 300, 26,
-       IDC_SET_APIKEY);
+    // ES_AUTOHSCROLL is not decoration: without it a single-line EDIT refuses
+    // every character past the visible width, and a 42-character key arrives
+    // here cut to 32.
+    mk(8, L"EDIT", L"", WS_VISIBLE | WS_BORDER | ES_PASSWORD | ES_AUTOHSCROLL, X + 760, Y + 24,
+       300, 26, IDC_SET_APIKEY);
     mkButton(8, L"Guardar clave", X + 760, Y + 58, 140, 30, IDC_SET_APIKEY_SAVE);
     mkButton(8, L"Borrar clave", X + 910, Y + 58, 140, 30, IDC_SET_APIKEY_CLEAR);
     mk(8, L"STATIC", L"", WS_VISIBLE, X + 760, Y + 96, 420, 40, IDC_SET_APIKEY_STATE);
@@ -2338,13 +2610,20 @@ void refreshHeatmap() {
     hmSet(view, std::move(d));
 }
 
+// Posts one line to the sidebar. Called from the worker thread, so the text
+// travels as a heap copy the UI thread frees.
+void postNet(App::NetState state, const std::wstring& text) {
+    if (!g || !g->hwnd) return;
+    PostMessageW(g->hwnd, WM_APP_NET, (WPARAM)state, (LPARAM) new std::wstring(text));
+}
+
 // Asks Riot for the ranks the cache lacks. The call is spaced so a development
 // key stays inside its quota, and the user is told how long it takes before it
 // starts. onlyLaneRival limits it to the enemy in the user's own position.
 void fetchMatchRanks(bool onlyLaneRival, bool force) {
     std::string matchId = selectedMatchId();
     if (matchId.empty()) {
-        setText(IDC_PROFILE_STATUS, "Elige una partida de la lista primero.");
+        status("Elige una partida de la lista primero.", App::NetState::Failed);
         return;
     }
     RiotApiConfig api;
@@ -2374,24 +2653,57 @@ void fetchMatchRanks(bool onlyLaneRival, bool force) {
                            L" jugadores. Son " + std::to_wstring(players * 2) +
                            L" llamadas espaciadas para no agotar tu cuota, unos " +
                            std::to_wstring(estimatedRefreshSeconds(players)) +
-                           L" s. La ventana se queda quieta mientras tanto.\n\n¿Sigo?";
+                           L" s. Puedes seguir usando la aplicación: el avance sale abajo "
+                           L"a la izquierda.\n\n¿Sigo?";
         if (MessageBoxW(g->hwnd, msg.c_str(), L"Rangos de la partida",
                         MB_OKCANCEL | MB_ICONINFORMATION) != IDOK)
             return;
     }
 
-    auto res = refreshMatchRanks(*g->db, matchId, api, only, force);
-    setText(IDC_PROFILE_STATUS, res.message);
-    rvSet(ctl(IDC_RANKS_VIEW), rvMatchRanks(matchId));
+    // Off the UI thread. Twenty calls spaced 1300 ms froze the window for
+    // twenty-five seconds, which is why the button looked dead.
+    if (g->netState == App::NetState::Working) {
+        status("Ya hay una consulta en curso. Espera a que acabe.", App::NetState::Failed);
+        return;
+    }
+    g->netState = App::NetState::Working;
+    postNet(App::NetState::Working, L"Rangos: preparando…");
+
+    std::thread([matchId, api, only, force, players] {
+        // Its own connection: sqlite serialises between connections, and the
+        // UI thread keeps reading from its own while this one writes.
+        try {
+            Db db;
+            auto res = refreshMatchRanks(db, matchId, api, only, force,
+                                         [&](RankFetchProgress p) {
+                                             postNet(App::NetState::Working,
+                                                     L"Rangos " + std::to_wstring(p.done) +
+                                                     L"/" + std::to_wstring(p.total) + L" · " +
+                                                     w(p.label));
+                                         });
+            postNet(res.ok ? App::NetState::Ok : App::NetState::Failed, w(res.message));
+        } catch (const std::exception& e) {
+            postNet(App::NetState::Failed, L"Rangos: " + w(e.what()));
+        }
+    }).detach();
+    (void)players;
 }
 
 // Stores the Riot key, or removes it. It is written through DPAPI and never
 // echoed back to the box (TASK-0025).
 void saveApiKeyFromUi(bool clear) {
+    // The message goes where the user is looking: the label under the key box
+    // AND the sidebar. Writing only to the profile page is how a rejected key
+    // looked like a button that did nothing.
+    auto keyError = [](const std::string& msg) {
+        setText(IDC_SET_APIKEY_STATE, msg);
+        status(msg, App::NetState::Failed);
+    };
+
     if (clear) {
         Config::saveApiKey("");
         g->db->audit("api_key", "{\"action\":\"cleared\"}");
-        setText(IDC_PROFILE_STATUS, "Clave de Riot borrada.");
+        status("Clave de Riot borrada.");
         refreshSettings();
         return;
     }
@@ -2400,18 +2712,24 @@ void saveApiKeyFromUi(bool clear) {
     while (!key.empty() && (unsigned char)key.front() <= ' ') key.erase(key.begin());
     while (!key.empty() && (unsigned char)key.back() <= ' ') key.pop_back();
     if (key.empty()) {
-        setText(IDC_PROFILE_STATUS, "Escribe la clave en el campo antes de guardarla.");
+        keyError("Escribe la clave en el campo antes de guardarla.");
         return;
     }
     if (key.rfind("RGAPI-", 0) != 0) {
-        setText(IDC_PROFILE_STATUS,
-                "Una clave de Riot empieza por RGAPI-. Copiala entera desde "
-                "developer.riotgames.com.");
+        keyError("Una clave de Riot empieza por RGAPI-. Copiala entera desde "
+                 "developer.riotgames.com.");
+        return;
+    }
+    // RGAPI- plus a 36-character uuid. Anything shorter is a paste that got
+    // cut, and it would fail with 401 on every call without saying why.
+    if (key.size() != 42) {
+        keyError("Esa clave tiene " + std::to_string(key.size()) +
+                 " caracteres y una de Riot tiene 42. Se pego cortada: copiala otra vez.");
         return;
     }
     Config::saveApiKey(key);
     g->db->audit("api_key", "{\"action\":\"saved\"}");
-    setText(IDC_PROFILE_STATUS, "Clave guardada y protegida con DPAPI.");
+    status("Clave guardada y protegida con DPAPI.");
     refreshSettings();
 }
 
@@ -2472,6 +2790,22 @@ void paintChrome(HDC dc) {
     std::wstring ver = L"v" + w(kAppVersion) + L" · " + w(appBuildStamp());
     TextOutW(dc, 24, 70, ver.c_str(), (int)ver.size());
 
+    // Network footer, above the client one. A call that takes twenty seconds
+    // with no sign of life reads as a dead button.
+    if (g->netState != App::NetState::Idle) {
+        SelectObject(dc, theme::small_());
+        COLORREF c = g->netState == App::NetState::Working ? theme::kAccent
+                   : g->netState == App::NetState::Ok      ? theme::kGood
+                                                           : theme::kDanger;
+        HBRUSH nd = CreateSolidBrush(c);
+        RECT ndr{22, rc.bottom - 88, 32, rc.bottom - 78};
+        FillRect(dc, &ndr, nd);
+        DeleteObject(nd);
+        SetTextColor(dc, c);
+        RECT ntr{40, rc.bottom - 96, kSidebarW - 8, rc.bottom - 50};
+        DrawTextW(dc, g->netText.c_str(), -1, &ntr, DT_WORDBREAK | DT_END_ELLIPSIS);
+    }
+
     // State footer.
     SelectObject(dc, theme::small_());
     bool live = g->agentState != "sin agente";
@@ -2502,6 +2836,38 @@ void drawOwnerButton(DRAWITEMSTRUCT* dis) {
     GetWindowTextW(dis->hwndItem, text, 128);
     SetBkMode(dc, TRANSPARENT);
 
+    if (id == IDC_RANK_LABEL) {
+        // Emblem then words, on one line the control owns end to end. Drawing
+        // the emblem from the window instead meant painting under a child, and
+        // the parent is clipped there: half of it was cut off.
+        FillRect(dc, &rc, theme::bgBrush());
+        int x = rc.left;
+        if (!g->profileTier.empty())
+            if (HBITMAP em = localIcon("tier-" + g->profileTier)) {
+                drawBitmap(dc, em, x, rc.top + 2, 36);
+                x += 42;
+            }
+        RECT tr{x, rc.top, rc.right, rc.bottom};
+        SelectObject(dc, theme::body());
+        SetTextColor(dc, theme::kText);
+        DrawTextW(dc, text, -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS);
+        return;
+    }
+    if (id >= IDC_QFILTER0 && id < IDC_QFILTER0 + kQueueFilterCount) {
+        // The chosen queue must be obvious: without it the list looks broken
+        // rather than filtered.
+        bool on = g->queueFilter == id - IDC_QFILTER0;
+        HBRUSH bg = CreateSolidBrush(on ? theme::kCardHi : theme::kCard);
+        FillRect(dc, &rc, bg);
+        DeleteObject(bg);
+        HBRUSH edge = CreateSolidBrush(on ? theme::kAccent : theme::kBorder);
+        FrameRect(dc, &rc, edge);
+        DeleteObject(edge);
+        SelectObject(dc, theme::small_());
+        SetTextColor(dc, on ? theme::kAccent : theme::kDim);
+        DrawTextW(dc, text, -1, &rc, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+        return;
+    }
     if (id >= IDC_NAV0 && id < IDC_NAV0 + kPages) {
         bool selected = g->currentPage == id - IDC_NAV0;
         HBRUSH bg = CreateSolidBrush(selected ? theme::kCard : theme::kSidebar);
@@ -2617,6 +2983,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             if (id == IDC_SET_APIKEY_SAVE || id == IDC_SET_APIKEY_CLEAR) {
                 saveApiKeyFromUi(id == IDC_SET_APIKEY_CLEAR);
+                return 0;
+            }
+            if (id >= IDC_QFILTER0 && id < IDC_QFILTER0 + kQueueFilterCount) {
+                g->queueFilter = id - IDC_QFILTER0;
+                refreshQueueFilter();
                 return 0;
             }
             if (id == IDC_RANKS_FETCH || id == IDC_RANKS_ONE || id == IDC_RANKS_FORCE) {
@@ -2792,7 +3163,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_APP_IPC:
             if (wp == 1) {
                 EnableWindow(ctl(IDC_ANALYZE), TRUE);
-                setText(IDC_PROFILE_STATUS, std::to_string((int)lp) + " partidas analizadas.");
+                status(std::to_string((int)lp) + " partidas analizadas.");
                 refreshMatchList();
                 refreshMission();
                 auto rows = g->db->listMatches(1);
@@ -2801,7 +3172,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 EnableWindow(ctl(IDC_SET_META), TRUE);
                 setText(IDC_SET_META, "Actualizar muestra");
                 int rows = (int)lp;
-                setText(IDC_PROFILE_STATUS, rows < 0
+                status(rows < 0
                     ? "No se pudo actualizar la muestra local."
                     : "Muestra local: " + std::to_string(rows) + " builds.");
                 refreshSettings();
@@ -2810,7 +3181,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 EnableWindow(ctl(IDC_MATCH_FETCH), TRUE);
                 int imported = (int)LOWORD(lp) - 1;
                 int analyzed = (int)HIWORD(lp);
-                setText(IDC_PROFILE_STATUS, imported < 0
+                status(imported < 0
                     ? "No se pudo leer el historial: abre el cliente de League y reintenta."
                     : std::to_string(imported) + " partidas nuevas, " +
                       std::to_string(analyzed) + " analizadas.");
@@ -2823,6 +3194,36 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 }
             } else {
                 processIpcQueue();
+            }
+            return 0;
+        case WM_APP_NET: {
+            std::unique_ptr<std::wstring> text((std::wstring*)lp);
+            g->netState = (App::NetState)wp;
+            if (text) g->netText = *text;
+            // A finished message stays a few seconds and then clears itself,
+            // so the sidebar never keeps an answer to a question nobody asked.
+            if (g->netState != App::NetState::Working) {
+                g->netUntilMs = (int64_t)GetTickCount64() + 8000;
+                SetTimer(g->hwnd, 1, 8200, nullptr);
+                // The rank arrived: the table has to show it without a click.
+                if (g->currentPage == 1) {
+                    rvSet(ctl(IDC_RANKS_VIEW), rvMatchRanks(selectedMatchId()));
+                    // setText, not status: the sidebar state is already the one
+                    // the worker reported, and status() would overwrite a
+                    // failure with its default "ok" and paint it green.
+                    setText(IDC_PROFILE_STATUS, util::narrow(g->netText));
+                }
+            }
+            InvalidateRect(g->hwnd, nullptr, FALSE);
+            return 0;
+        }
+        case WM_TIMER:
+            if (wp == 1 && g->netState != App::NetState::Working &&
+                (int64_t)GetTickCount64() >= g->netUntilMs) {
+                KillTimer(g->hwnd, 1);
+                g->netState = App::NetState::Idle;
+                g->netText.clear();
+                InvalidateRect(g->hwnd, nullptr, FALSE);
             }
             return 0;
         case WM_APP_ICONS:

@@ -87,6 +87,10 @@ usuario. Solo la octava necesita una clave y cuota.
 ## Verdicts
 
 (the tool appends a line here when a task with an eye closes)
+- 2026-09-08 · TASK-0025 · "pues ahora si todo esta funcionando riot api conectado y funcionando genial"
+- 2026-09-08 · TASK-0026 · "perfecto todo esto funciono"
+- 2026-09-08 · TASK-0029 · "perfecto todo esto funciono; se ve todo mejor"
+- 2026-09-08 · TASK-0030 · "perfecto todo esto funciono"
 
 ## Out of scope
 

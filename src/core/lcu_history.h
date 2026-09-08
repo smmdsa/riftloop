@@ -12,6 +12,16 @@
 
 namespace rl {
 
+// Repairs the teamPosition of an already converted v5 payload, in place.
+// Returns how many participants it moved.
+//
+// The client mislabels two roles, measured on 2026-09-07 (see the .cpp):
+// the top laner arrives as JUNGLE, and before this the support arrived as
+// BOTTOM. Both are separated by numbers that survive into the stored payload,
+// so a match imported before the fix can be repaired without asking Riot
+// again.
+int repairPositionsV5(nlohmann::json& participants);
+
 // v4 game object -> v5-shaped {"metadata":{...},"info":{...}}.
 // dd resolves championId -> name; pass nullptr to keep names empty.
 nlohmann::json convertLcuGameToV5(const nlohmann::json& lcuGame, const Ddragon* dd);

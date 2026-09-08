@@ -139,6 +139,12 @@ void workerLoop() {
 
 } // namespace
 
+// loadPng lives in the anonymous namespace above, so nothing outside icons can
+// reach it. localIcon needs exactly that and nothing else.
+HBITMAP loadFromFile(const std::wstring& path) {
+    return loadPng(path);
+}
+
 void init(HWND notifyWindow) {
     notifyHwnd = notifyWindow;
     if (!wic)
@@ -185,6 +191,25 @@ HBITMAP get(const std::string& kind, const std::string& id, const std::string& u
 
 } // namespace icons
 
+HBITMAP localIcon(const std::string& name) {
+    // Loaded once and kept: assets\icons holds twenty files that never change
+    // while the program runs, and a miss is remembered as a miss.
+    static std::map<std::string, HBITMAP> cache;
+    auto it = cache.find(name);
+    if (it != cache.end()) return it->second;
+
+    wchar_t exe[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring dir = exe;
+    size_t cut = dir.find_last_of(L'\\');
+    dir = cut == std::wstring::npos ? L"." : dir.substr(0, cut);
+
+    std::wstring wide(name.begin(), name.end());
+    HBITMAP bmp = icons::loadFromFile(dir + L"\\assets\\icons\\" + wide + L".png");
+    cache[name] = bmp;
+    return bmp;
+}
+
 void drawBitmap(HDC dc, HBITMAP bmp, int x, int y, int size) {
     if (!bmp) return;
     BITMAP info{};
@@ -207,8 +232,78 @@ struct RVData {
     int contentHeight = 0;
     // Hover state for the explanation tip. -1 = the pointer is on no row.
     int  hoverIndex = -1;
+    int  hoverChip = -1;
     bool trackingLeave = false;
+    // Left edge of the place column, per row, measured while painting. The
+    // place is right-aligned after a title of any width, so one shared value
+    // would give every row the widest row's zone.
+    std::map<int, int> placeLeft;
 };
+
+// Column geometry of a PlayerRow, in offsets from the row origin. The painter
+// and the tip hit test both read these, so what the pointer is over is always
+// what the eye is over.
+namespace playerRow {
+constexpr int kPortrait = 0,  kPortraitW = 30;
+constexpr int kRole     = 30, kRoleW     = 20;
+constexpr int kName     = 50, kNameW     = 178;
+// The rank emblem sits between the name and the numbers, in its own column.
+constexpr int kTier     = 232, kTierW    = 34;
+constexpr int kKda      = 274, kKdaW     = 90;
+constexpr int kFarm     = 368, kFarmW    = 168;
+constexpr int kChips    = 542, kChipW    = 24;
+constexpr int kGapW     = 10;
+
+// Which chip index sits under localX, or -1.
+int chipAt(const RVItem& it, int localX) {
+    int cx = kChips;
+    for (size_t i = 0; i < it.chips.size(); ++i) {
+        if ((int)i == it.chipGap && i > 0) cx += kGapW;
+        if (localX >= cx && localX < cx + kChipW) return (int)i;
+        cx += kChipW;
+    }
+    return -1;
+}
+} // namespace playerRow
+
+// The five positions, drawn by hand: a corner for top and bottom, the diagonal
+// for mid, leaves for the jungle, a pair for the duo lane. This is the
+// fallback. localIcon draws the real game icon when assets\icons is there, and
+// a stripped install still says which lane is which.
+void drawRoleMark(HDC dc, const std::string& role, int x, int y, int size, COLORREF c) {
+    if (role.empty()) return;
+    HPEN pen = CreatePen(PS_SOLID, 2, c);
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    HBRUSH br = CreateSolidBrush(c);
+    int a = x + 2, b = y + 2, e = x + size - 2, f = y + size - 2;
+
+    if (role == "TOP") {
+        MoveToEx(dc, a, f, nullptr); LineTo(dc, a, b); LineTo(dc, e, b);
+    } else if (role == "BOTTOM") {
+        MoveToEx(dc, a, f, nullptr); LineTo(dc, e, f); LineTo(dc, e, b);
+    } else if (role == "MIDDLE") {
+        MoveToEx(dc, a, f, nullptr); LineTo(dc, e, b);
+    } else if (role == "JUNGLE") {
+        // Three strokes fanning out, like the camps between the lanes.
+        int mx = (a + e) / 2;
+        MoveToEx(dc, mx, f, nullptr); LineTo(dc, mx, b + 2);
+        MoveToEx(dc, mx, y + size / 2, nullptr); LineTo(dc, a, b + 2);
+        MoveToEx(dc, mx, y + size / 2, nullptr); LineTo(dc, e, b + 2);
+    } else if (role == "UTILITY") {
+        RECT r1{a, y + size / 2 - 1, a + 5, y + size / 2 + 4};
+        RECT r2{e - 5, y + size / 2 - 4, e, y + size / 2 + 1};
+        FillRect(dc, &r1, br);
+        FillRect(dc, &r2, br);
+        MoveToEx(dc, a + 5, y + size / 2 + 1, nullptr); LineTo(dc, e - 5, y + size / 2 - 1);
+    }
+    SelectObject(dc, oldPen);
+    DeleteObject(pen);
+    DeleteObject(br);
+}
+
+// Left margin of every row. The painter starts here and the tip hit test
+// measures from here, so the two can never drift apart.
+constexpr int kRowOriginX = 16;
 
 int itemHeight(const RVItem& it) {
     switch (it.kind) {
@@ -238,6 +333,34 @@ int measureItem(HDC dc, const RVItem& it, int width) {
     return (rc.bottom > lineH - 4) ? rc.bottom + 6 : lineH;
 }
 
+// The tip of the column under the pointer. Returns an empty tip when that
+// column has nothing to say. chip carries the chip index so the caller can
+// tell one hover from another without comparing whole tips.
+// localX is measured from the row origin, which is where the painter starts
+// drawing: kRowOriginX plus the indent of that item. Passing a window x with a
+// constant subtracted shifts every zone of an indented row.
+const RVTip* tipUnder(const RVData* d, int row, const RVItem& it, int localX, int& chip) {
+    chip = -1;
+    if (it.kind != RVKind::PlayerRow) return nullptr;
+    auto place = d->placeLeft.find(row);
+    if (place != d->placeLeft.end() && localX >= place->second) return &it.tipPlace;
+
+    int c = playerRow::chipAt(it, localX);
+    if (c >= 0 && c < (int)it.chipTips.size()) {
+        chip = c;
+        return &it.chipTips[c];
+    }
+    if (localX >= playerRow::kTier && localX < playerRow::kTier + playerRow::kTierW)
+        return &it.tipTier;
+    if (localX >= playerRow::kFarm && localX < playerRow::kFarm + playerRow::kFarmW)
+        return &it.tipFarm;
+    if (localX >= playerRow::kKda && localX < playerRow::kKda + playerRow::kKdaW)
+        return &it.tipKda;
+    if (localX >= playerRow::kPortrait && localX < playerRow::kName + playerRow::kNameW)
+        return &it.tipName;
+    return nullptr;
+}
+
 void rvPaint(HWND hwnd, RVData* d) {
     PAINTSTRUCT ps;
     HDC winDc = BeginPaint(hwnd, &ps);
@@ -253,11 +376,22 @@ void rvPaint(HWND hwnd, RVData* d) {
     FillRect(dc, &rc, cardBr);
     SetBkMode(dc, TRANSPARENT);
 
+    // The place zones are measured while painting, so they belong to this
+    // frame only. Keeping the old ones lets a row inherit the zone of whatever
+    // sat at its index before: after a shorter list replaces a longer one, a
+    // stale entry makes tipUnder answer with an empty tipPlace and swallow
+    // every other column of that row.
+    d->placeLeft.clear();
+
     int y = 14 - d->scroll;
+    // The index travels with the item: the place zone of the tip is measured
+    // here, per row, and the hit test looks it up by the same index.
+    int rowIndex = -1;
     for (auto& it : d->items) {
+        ++rowIndex;
         int h = measureItem(dc, it, W);
         if (y + h >= 0 && y <= H) {
-            int x = 16 + it.indent;
+            int x = kRowOriginX + it.indent;
             switch (it.kind) {
                 case RVKind::Title: {
                     int tx = x;
@@ -345,23 +479,76 @@ void rvPaint(HWND hwnd, RVData* d) {
                         DeleteObject(cb);
                     }
 
+                    // The role, between the portrait and the name.
+                    if (!it.role.empty()) {
+                        HBITMAP roleBmp = localIcon("lane-" + it.role);
+                        if (roleBmp)
+                            drawBitmap(dc, roleBmp, x + playerRow::kRole, y + 6, 18);
+                        else
+                            drawRoleMark(dc, it.role, x + playerRow::kRole, y + 8, 16,
+                                         theme::kDim);
+                    }
+
+                    // The header row names the columns with the game's own
+                    // marks: sword for K/D/A, minion for cs, coin for gold.
+                    if (it.color == theme::kBorder) {
+                        struct { const char* icon; int at; } marks[] = {
+                            {"stat-kda",   playerRow::kKda - 22},
+                            {"stat-cs",    playerRow::kFarm - 22},
+                        };
+                        for (auto& m : marks)
+                            if (HBITMAP b = localIcon(m.icon))
+                                drawBitmap(dc, b, x + m.at, y + 8, 16);
+                    }
+
                     SelectObject(dc, theme::small_());
                     SetTextColor(dc, theme::kText);
-                    RECT nameRc{x + 34, y + 2, x + 34 + 174, y + 32};
+                    RECT nameRc{x + playerRow::kName, y + 2,
+                                x + playerRow::kName + playerRow::kNameW, y + 32};
                     DrawTextW(dc, it.text.c_str(), -1, &nameRc,
                               DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS);
 
+                    // The rank badge. Its own column, always filled: an empty
+                    // slot reads as a bug, the unranked emblem reads as an
+                    // answer.
+                    if (it.kind == RVKind::PlayerRow && it.color != theme::kBorder) {
+                        std::string emblem = it.tier.empty() ? "UNRANKED" : it.tier;
+                        if (HBITMAP badge = localIcon("tier-" + emblem)) {
+                            int bx = x + playerRow::kTier, by = y + 2;
+                            drawBitmap(dc, badge, bx, by, 30);
+                            // A rank nobody has asked for yet is not the same
+                            // answer as "this player is unranked". The dimmed
+                            // badge says "unknown"; the solid one says "none".
+                            if (!it.tierRead) {
+                                HDC veil = CreateCompatibleDC(dc);
+                                HBITMAP vb = CreateCompatibleBitmap(dc, 30, 30);
+                                HGDIOBJ ov = SelectObject(veil, vb);
+                                RECT vr{0, 0, 30, 30};
+                                HBRUSH vbr = CreateSolidBrush(theme::kCard);
+                                FillRect(veil, &vr, vbr);
+                                DeleteObject(vbr);
+                                BLENDFUNCTION bf{AC_SRC_OVER, 0, 165, 0};
+                                AlphaBlend(dc, bx, by, 30, 30, veil, 0, 0, 30, 30, bf);
+                                SelectObject(veil, ov);
+                                DeleteObject(vb);
+                                DeleteDC(veil);
+                            }
+                        }
+                    }
+
                     SetTextColor(dc, theme::kDim);
-                    RECT kdaRc{x + 214, y + 2, x + 214 + 90, y + 32};
+                    RECT kdaRc{x + playerRow::kKda, y + 2,
+                               x + playerRow::kKda + playerRow::kKdaW, y + 32};
                     DrawTextW(dc, it.kda.c_str(), -1, &kdaRc,
                               DT_SINGLELINE | DT_VCENTER | DT_LEFT);
-                    RECT farmRc{x + 306, y + 2, x + 306 + 170, y + 32};
+                    RECT farmRc{x + playerRow::kFarm, y + 2,
+                                x + playerRow::kFarm + playerRow::kFarmW, y + 32};
                     DrawTextW(dc, it.farm.c_str(), -1, &farmRc,
                               DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS);
 
-                    int cx = x + 484;
+                    int cx = x + playerRow::kChips;
                     for (size_t ci = 0; ci < it.chips.size(); ++ci) {
-                        if ((int)ci == it.chipGap && ci > 0) cx += 10;
+                        if ((int)ci == it.chipGap && ci > 0) cx += playerRow::kGapW;
                         const RVChip& chip = it.chips[ci];
                         RECT slot{cx, y + 5, cx + 22, y + 27};
                         HBITMAP cb = chip.id.empty()
@@ -374,7 +561,7 @@ void rvPaint(HWND hwnd, RVData* d) {
                             FillRect(dc, &slot, e);
                             DeleteObject(e);
                         }
-                        cx += 24;
+                        cx += playerRow::kChipW;
                     }
 
                     // The place and the title, right-aligned. A percentage
@@ -409,6 +596,8 @@ void rvPaint(HWND hwnd, RVData* d) {
                         SetTextColor(dc, theme::kText);
                         TextOutW(dc, rightEdge - sz.cx, y + 6, it.place.c_str(),
                                  (int)it.place.size());
+                        // The podium tip belongs to this box and nowhere else.
+                        d->placeLeft[rowIndex] = rightEdge - sz.cx - 6;
                     }
                     break;
                 }
@@ -665,23 +854,29 @@ LRESULT CALLBACK ReportProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 TrackMouseEvent(&tme);
                 d->trackingLeave = true;
             }
-            if (idx == d->hoverIndex) return 0;
+            int chip = -1;
+            const RVTip* tip = nullptr;
+            if (idx >= 0 && idx < (int)d->items.size()) {
+                const RVItem& hovered = d->items[idx];
+                tip = tipUnder(d, idx, hovered, p.x - (kRowOriginX + hovered.indent), chip);
+            }
+            if (idx == d->hoverIndex && chip == d->hoverChip) return 0;
             d->hoverIndex = idx;
-            if (idx < 0 || idx >= (int)d->items.size() ||
-                d->items[idx].tipTitle.empty()) {
+            d->hoverChip = chip;
+            if (!tip || tip->title.empty()) {
                 tipHide();
                 return 0;
             }
             POINT screen = p;
             ClientToScreen(hwnd, &screen);
-            const RVItem& it = d->items[idx];
-            tipShow(hwnd, screen, it.tipTitle, it.tipSubtitle, it.tipLines, it.tipFooter);
+            tipShow(hwnd, screen, *tip);
             return 0;
         }
         case WM_MOUSELEAVE: {
             if (d) {
                 d->trackingLeave = false;
                 d->hoverIndex = -1;
+                d->hoverChip = -1;
             }
             tipHide();
             return 0;
