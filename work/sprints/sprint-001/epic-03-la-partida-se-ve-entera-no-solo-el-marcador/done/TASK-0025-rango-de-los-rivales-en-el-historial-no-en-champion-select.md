@@ -60,3 +60,7 @@ Champion select, por politica. No es una limitacion tecnica y no se resuelve mas
 Cualquier MMR estimado o puntuacion propia. Solo tier y division oficiales.
 
 El rango propio, que sale gratis del cliente en TASK-0024.
+
+## Verdict
+
+- 2026-09-08 · by user · "pues ahora si todo esta funcionando riot api conectado y funcionando genial"

@@ -10,6 +10,16 @@ cada uno), `tests/` (suite única con fixtures sintéticos + Data Dragon 16.17.1
 en `tests/fixtures/ddragon/`). Lee [WORK-LOG.md](WORK-LOG.md) antes de tocar nada: tiene el
 detalle de cada decisión y de los bugs que ya se cazaron.
 
+**Iconos que Data Dragon no trae.** `assets/icons/` guarda 20 PNG (101 KB): los cinco
+iconos de línea, cuatro marcas de columna y los once emblemas de rango. Medido el
+2026-09-07: Data Dragon sirve `champion`, `item`, `spell`, `passive`, `profileicon`, `map`,
+`sprite` y `perk-images`, y responde 403 a todo `img/ui/*`; el cliente responde 400 a las
+rutas de posición. Salen de `github.com/noxelisdev/LoL_DDragon`, carpeta `extras/`, cuyo
+propio README dice que no forman parte de Data Dragon. **Se copian al repositorio, no se
+descargan en ejecución**: ese repositorio pesa 10.5 GB, no declara licencia y lo mantiene
+una persona. `assets/icons/SOURCE.md` guarda la procedencia y `rlui::localIcon` devuelve
+nullptr si la carpeta no está, así que cada vista tiene su respaldo dibujado o de texto.
+
 **Fuentes de datos.** La ingesta primaria es el historial del propio cliente (LCU
 `lol-match-history`, v4 convertido a v5 en `src/core/lcu_history.cpp`); la Riot API con key
 es fallback de CLI. Cada partida importada aporta las 10 páginas de runas y las 10 builds
@@ -49,6 +59,12 @@ muestra con la numeración del cliente vía `Ddragon::displayPatch` (ddragon 16.
 --curves <id|last>                    --rofl-stats <id|last>
 --ranks <id|last> [refresh|force] [participantId]
 ```
+
+`--repair-positions` arregla TOP y UTILITY en las partidas ya importadas. El cliente
+etiqueta al top como `JUNGLE` y daba el rol del support como `SUPPORT`, no `DUO_SUPPORT`:
+medido el 2026-09-07, 59 de las 67 partidas del usuario tenían dos JUNGLE y dos BOTTOM por
+equipo. `repairPositionsV5` (`src/core/lcu_history.cpp`) los separa por Castigo y por
+farmeo, sobre el JSON ya guardado y sin pedirle nada a Riot.
 
 `--frame` vuelca un fotograma a PNG: es la forma de comprobar que un clip cae donde dice
 (el reloj del juego se lee en la esquina superior derecha).
