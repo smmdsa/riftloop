@@ -49,6 +49,7 @@ void usage() {
         "  --curves <id|last>           Oro, CS y xp por minuto contra tu mediana de rol\n"
         "  --rofl-stats <id|last>       Metricas del replay que match-v5 no da\n"
         "  --ranks <id|last> [refresh]  Rango de los diez de una partida ya jugada\n"
+        "  --repair-positions           Arregla TOP y SUPPORT en las partidas guardadas\n"
         "  --fetch-lcu [N]              Descarga N partidas desde el cliente de League\n"
         "  --fetch [N]                  Via Riot API (opcional, necesita API key)\n"
         "  --meta [N]                   Refresca la muestra local de builds y runas\n"
@@ -598,10 +599,46 @@ int ranksReport(Db& db, const std::string& idArg, bool refresh, bool force, int 
                     "clasificar, %d sin leer)\n", v.averageTier.c_str(),
                     v.averageDivision.c_str(), v.known, v.unranked, v.missing);
     } else {
-        std::printf("\nSin promedio: hacen falta al menos 6 rangos conocidos y hay %d.\n",
-                    v.known);
+        std::printf("\nSin promedio. %s\n", v.note.empty() ? "Faltan rangos por leer." : v.note.c_str());
     }
     if (!v.note.empty()) std::printf("%s\n", v.note.c_str());
+    return 0;
+}
+
+// The client labels the top laner JUNGLE and, before the fix, the support
+// BOTTOM. Matches imported earlier carry that inside their stored json, and
+// lane/role are gone from it. repairPositionsV5 rebuilds both from numbers the
+// payload keeps, so nothing is asked of Riot again.
+int repairPositions(Db& db) {
+    int matches = 0, moved = 0, touched = 0;
+    for (auto& row : db.listMatches(1000)) {
+        std::string raw = db.matchJson(row.matchId);
+        if (raw.empty()) continue;
+        ++matches;
+        json j;
+        try {
+            j = json::parse(raw);
+        } catch (...) {
+            continue;
+        }
+        if (!j.contains("info") || !j["info"].contains("participants")) continue;
+        int n = repairPositionsV5(j["info"]["participants"]);
+        if (n == 0) continue;
+        db.replaceMatchJson(row.matchId, j.dump());
+        moved += n;
+        ++touched;
+
+        // The user columns of the row carry the old position too.
+        std::string puuid = resolveUserPuuid(db);
+        if (auto m = parseMatch(j.dump()))
+            if (const Participant* me = puuid.empty() ? nullptr : m->byPuuid(puuid))
+                db.updateMatchUser(row.matchId, me->championName, me->position, me->win);
+    }
+    std::printf("%d partidas revisadas, %d corregidas, %d jugadores movidos.\n",
+                matches, touched, moved);
+    if (touched > 0)
+        std::printf("Las posiciones salen de Castigo y del farmeo, no del cliente: "
+                    "el cliente las da mal en estas partidas.\n");
     return 0;
 }
 
@@ -647,6 +684,7 @@ int main(int argc, char** argv) {
         if (cmd == "--export-fixture" && args.size() >= 3) return exportFixture(db, args[1], args[2]);
         if (cmd == "--curves" && args.size() >= 2) return curvesReport(db, args[1]);
         if (cmd == "--rofl-stats" && args.size() >= 2) return roflStats(db, args[1]);
+        if (cmd == "--repair-positions") return repairPositions(db);
         if (cmd == "--ranks" && args.size() >= 2) {
             bool refresh = false, force = false;
             int only = 0;
