@@ -200,9 +200,9 @@ git push -u origin <rama>
 gh pr create --base main --title "..." --body "..."
 ```
 
-El nombre de la rama empieza por el area (`ep-03`, `draft`, `clips`, `docs`, `fix`, `flujo`)
-y sigue con lo que hace, en minusculas y con guiones. Un commit por cambio logico, y el
-cuerpo explica por que, no que.
+El nombre de la rama empieza por el área (`ep-03`, `draft`, `clips`, `docs`, `fix`, `flujo`)
+y sigue con lo que hace, en minúsculas y con guiones. Un commit por cambio lógico, y el
+cuerpo explica por qué, no qué.
 
 **Antes de abrir el PR, la suite pasa entera.** El numero de checks va en el cuerpo del PR.
 Un PR que no dice cuantos checks corrio no se mira.
