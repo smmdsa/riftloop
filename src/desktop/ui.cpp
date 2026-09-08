@@ -192,8 +192,8 @@ HBITMAP get(const std::string& kind, const std::string& id, const std::string& u
 } // namespace icons
 
 HBITMAP localIcon(const std::string& name) {
-    // Loaded once and kept: these are nine files that never change while the
-    // program runs, and a miss is remembered as a miss.
+    // Loaded once and kept: assets\icons holds twenty files that never change
+    // while the program runs, and a miss is remembered as a miss.
     static std::map<std::string, HBITMAP> cache;
     auto it = cache.find(name);
     if (it != cache.end()) return it->second;

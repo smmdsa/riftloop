@@ -50,7 +50,8 @@ target_link_libraries(RiftLoop.Capture PRIVATE riftloop_core windowsapp d3d11 dx
 target_compile_options(RiftLoop.Capture PRIVATE /await)
 
 # --- assets ------------------------------------------------------------------
-# Nine game icons that Data Dragon does not ship (assets/icons/SOURCE.md). They
+# Twenty game icons that Data Dragon does not ship, 88 KB: five lanes, four
+# scoreboard marks and eleven rank emblems (assets/icons/SOURCE.md). They
 # sit next to the executable so the app reads them from disk and downloads
 # nothing.
 add_custom_target(riftloop_assets ALL

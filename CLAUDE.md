@@ -10,7 +10,7 @@ cada uno), `tests/` (suite única con fixtures sintéticos + Data Dragon 16.17.1
 en `tests/fixtures/ddragon/`). Lee [WORK-LOG.md](WORK-LOG.md) antes de tocar nada: tiene el
 detalle de cada decisión y de los bugs que ya se cazaron.
 
-**Iconos que Data Dragon no trae.** `assets/icons/` guarda 20 PNG (101 KB): los cinco
+**Iconos que Data Dragon no trae.** `assets/icons/` guarda 20 PNG (88 KB): los cinco
 iconos de línea, cuatro marcas de columna y los once emblemas de rango. Medido el
 2026-09-07: Data Dragon sirve `champion`, `item`, `spell`, `passive`, `profileicon`, `map`,
 `sprite` y `perk-images`, y responde 403 a todo `img/ui/*`; el cliente responde 400 a las
